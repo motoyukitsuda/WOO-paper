@@ -1,0 +1,1160 @@
+# Set up Seurat object
+library(Seurat)
+library(SeuratWrappers)
+library(SeuratData)
+library(patchwork)
+library(SeuratDisk)
+library(dittoSeq)
+library(DESeq2)
+library(tidyverse)
+library(batchelor)
+library(reticulate)
+library(SeuratObject)
+options("preferRaster" = FALSE)
+library(qusage)
+library(org.Hs.eg.db)
+library(GSVA)
+library(ComplexHeatmap)
+library(DoubletFinder)
+set.seed(1234)
+scvi.settings.seed = 9627
+options(future.globals.maxSize=9999999999999999)
+library(scCustomize)
+library(ggpubr)
+library(decontX)
+library(future)
+library(ggrepel)
+library(BPCells)
+library(infercnv)
+library(qs)
+options(scipen = 100)
+save_env_qs <- function(file = "my_environment.qs", preset = "high") {
+  qsave(mget(ls(envir = .GlobalEnv), envir = .GlobalEnv), file = file, preset = preset)
+  message("Environment saved to ", file)
+}
+
+# Function to load environment
+load_env_qs <- function(file = "my_environment.qs") {
+  if (!file.exists(file)) stop("File does not exist: ", file)
+  list2env(qread(file), envir = .GlobalEnv)
+  message("Environment loaded from ", file)
+}
+
+woo_cobi<- readRDS("RDSfile/from/GEO")
+DefaultAssay(woo_cobi)<-"RNA"
+woo_cobi[["percent.mt"]] <- PercentageFeatureSet(woo_cobi, pattern = "^MT-")
+VlnPlot(woo_cobi,features="percent.mt",group.by="sample")
+woo_cobi$log10GenesPerUMI <- log10(woo_cobi$nFeature_RNA) / log10(woo_cobi$nCount_RNA)
+FeatureScatter(woo_cobi, feature1 = "log10GenesPerUMI", feature2 = "nFeature_RNA",group.by="sample")
+FeatureScatter(woo_cobi, feature1 = "log10GenesPerUMI", feature2 = "percent.mt",group.by="sample")
+FeatureScatter(woo_cobi, feature1 = "nFeature_RNA", feature2 = "percent.mt",group.by="sample")
+woo_cobi<-NormalizeData(woo_cobi)
+RidgePlot(woo_cobi,features="MALAT1",group.by="sample")
+
+woo_cobi<-subset(woo_cobi,subset=nFeature_RNA>500 & nCount_RNA>750)
+woo_cobi<-NormalizeData(woo_cobi)
+woo_cobi[["RNA"]]<-split(woo_cobi[["RNA"]],f=woo_cobi$sample)
+woo_cobi<-FindVariableFeatures(woo_cobi)
+woo_cobi<-ScaleData(woo_cobi)
+woo_cobi<-RunPCA(woo_cobi)
+woo_cobi<-IntegrateLayers(woo_cobi, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+woo_cobi<- FindNeighbors(woo_cobi, reduction = "harmony", dims = 1:30)
+woo_cobi<- FindClusters(woo_cobi, resolution = 0.1, cluster.name = "harmony_clusters")
+woo_cobi<- RunUMAP(woo_cobi, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(woo_cobi, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+woo_cobi<-JoinLayers(woo_cobi)
+
+#scDblfinder
+library(scDblFinder)
+library(BiocParallel)
+library(scater)
+bp <- MulticoreParam(8, RNGseed=1234)
+woo_cobi_sce<-scDblFinder(as.SingleCellExperiment(woo_cobi,assay="RNA"),samples="sample",cluster="harmony_clusters",BPPARAM=bp) 
+woo_cobi$scDblFinder.score <- woo_cobi_sce$scDblFinder.score
+woo_cobi$scDblFinder.class <- woo_cobi_sce$scDblFinder.class
+DimPlot(woo_cobi, reduction="umap.harmony",group.by=c("scDblFinder.class"),label=T)
+
+woo_cobi<-subset(woo_cobi,subset=scDblFinder.class=="singlet")
+
+woo_cobi[["RNA"]]<-split(woo_cobi[["RNA"]],f=woo_cobi$sample)
+woo_cobi<-FindVariableFeatures(woo_cobi)
+woo_cobi<-ScaleData(woo_cobi)
+woo_cobi<-RunPCA(woo_cobi)
+woo_cobi<-IntegrateLayers(woo_cobi, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+woo_cobi<- FindNeighbors(woo_cobi, reduction = "harmony", dims = 1:30)
+woo_cobi<- FindClusters(woo_cobi, resolution = 0.1, cluster.name = "harmony_clusters")
+woo_cobi<- RunUMAP(woo_cobi, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(woo_cobi, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+woo_cobi<-JoinLayers(woo_cobi)
+
+#decontX
+list<-SplitObject(woo_cobi, split.by= "sample")
+for (i in 1:length(list)) {
+  sce <- as.SingleCellExperiment(list[[i]], assay = "RNA")
+  sce <- decontX(sce, assayName = "counts", z = sce$harmony_clusters)
+  list[[i]][["decontXcounts"]] <- CreateAssayObject(counts = decontXcounts(sce))
+}
+
+
+woo_cobi<-Merge_Seurat_List(
+  list,
+  project = "woo_cobi"
+)
+colnames(woo_cobi) <- substr(colnames(woo_cobi), 2, nchar(colnames(woo_cobi)))
+
+
+rm(list)
+
+
+saveRDS(woo_cobi,"~/Desktop/Sears lab/Experiment/single cell RNA seq/Pt5_36/woo_cobi_nFeature500_nCount750_MALAT13__cluster01_singlet_decontX.rds")
+
+
+DefaultAssay(woo_cobi)<-"decontXcounts"
+woo_cobi[["decontXcounts"]]<-split(woo_cobi[["decontXcounts"]],f=woo_cobi$sample)
+woo_cobi<-NormalizeData(woo_cobi)
+woo_cobi<-FindVariableFeatures(woo_cobi)
+woo_cobi<-ScaleData(woo_cobi)
+woo_cobi<-RunPCA(woo_cobi)
+woo_cobi<-IntegrateLayers(woo_cobi, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+woo_cobi<- FindNeighbors(woo_cobi, reduction = "harmony", dims = 1:30)
+woo_cobi<- FindClusters(woo_cobi, resolution = 0.2, cluster.name = "harmony_clusters")
+woo_cobi<- RunUMAP(woo_cobi, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(woo_cobi, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+woo_cobi<-JoinLayers(woo_cobi) 
+
+saveRDS(woo_cobi,"~/Desktop/Sears lab/Experiment/single cell RNA seq/Pt5_36/woo_cobi500-750_0.1_singlet")
+
+woo_cobi$ptID<-NA
+woo_cobi$ptID[woo_cobi$sample=="Pt5_pre"]<-"Pt5_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt6_pre"]<-"Pt6_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt6_post"]<-"Pt6_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt7_pre"]<-"Pt7_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt7_post"]<-"Pt7_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt8_pre"]<-"Pt8_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt8_post"]<-"Pt8_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt9_pre"]<-"Pt9_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt9_post"]<-"Pt9_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt10_post"]<-"Pt10_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt11_pre"]<-"Pt11_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt11_post"]<-"Pt11_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt12_pre"]<-"Pt12_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt12_post"]<-"Pt12_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt13_pre"]<-"Pt13_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt13_post"]<-"Pt13_post"
+woo_cobi$ptID[woo_cobi$sample=="Pt14_pre"]<-"Pt14_pre"
+woo_cobi$ptID[woo_cobi$sample=="Pt14_post"]<-"Pt14_post"
+
+
+woo_cobi$patient<-NA
+woo_cobi$patient[woo_cobi$sample=="Pt5_pre"]<-"Pt5"
+woo_cobi$patient[woo_cobi$sample=="Pt6_pre"]<-"Pt6"
+woo_cobi$patient[woo_cobi$sample=="Pt6_post"]<-"Pt6"
+woo_cobi$patient[woo_cobi$sample=="Pt7_pre"]<-"Pt7"
+woo_cobi$patient[woo_cobi$sample=="Pt7_post"]<-"Pt7"
+woo_cobi$patient[woo_cobi$sample=="Pt8_pre"]<-"Pt8"
+woo_cobi$patient[woo_cobi$sample=="Pt8_post"]<-"Pt8"
+woo_cobi$patient[woo_cobi$sample=="Pt9_pre"]<-"Pt9"
+woo_cobi$patient[woo_cobi$sample=="Pt9_post"]<-"Pt9"
+woo_cobi$patient[woo_cobi$sample=="Pt10_post"]<-"Pt10"
+woo_cobi$patient[woo_cobi$sample=="Pt11_pre"]<-"Pt11"
+woo_cobi$patient[woo_cobi$sample=="Pt11_post"]<-"Pt11"
+woo_cobi$patient[woo_cobi$sample=="Pt12_pre"]<-"Pt12"
+woo_cobi$patient[woo_cobi$sample=="Pt12_post"]<-"Pt12"
+woo_cobi$patient[woo_cobi$sample=="Pt13_pre"]<-"Pt13"
+woo_cobi$patient[woo_cobi$sample=="Pt13_post"]<-"Pt13"
+woo_cobi$patient[woo_cobi$sample=="Pt14_pre"]<-"Pt14"
+woo_cobi$patient[woo_cobi$sample=="Pt14_post"]<-"Pt14"
+
+woo_cobi$response<-"non-BR"
+woo_cobi$response[woo_cobi$sample%in% c("Pt6_pre","Pt6_post","Pt12_pre","Pt12_post")]<-"BR"
+woo_cobi$pre_post<-"post"
+woo_cobi$pre_post[woo_cobi$sample%in% c("Pt6_pre","Pt5_pre","Pt12_pre","Pt7_pre","Pt8_pre","Pt9_pre","Pt11_pre","Pt13_pre","Pt14_pre")]<-"pre"
+woo_cobi$response_pre_post <- paste(woo_cobi$response, woo_cobi$pre_post, sep = "_")
+woo_cobi$response_pre_post<-factor(woo_cobi$response_pre_post,levels=c("BR_pre","BR_post","non-BR_pre","non-BR_post"))
+
+
+cancer<-subset(woo_cobi,subset=harmony_clusters %in% c("3"))
+stroma<-subset(woo_cobi,subset=harmony_clusters %in% c("3"),invert=T)
+cancer<-subset(cancer,subset=percent.mt<20)
+stroma<-subset(stroma,subset=percent.mt<10)
+
+woo_cobi2<-merge(cancer,stroma)
+rm(cancer)
+rm(stroma)
+DefaultAssay(woo_cobi2)<-"decontXcounts"
+woo_cobi2<-JoinLayers(woo_cobi2)
+woo_cobi2[["decontXcounts"]]<-split(woo_cobi2[["decontXcounts"]],f=woo_cobi2$sample)
+woo_cobi2<-FindVariableFeatures(woo_cobi2)
+woo_cobi2<-ScaleData(woo_cobi2)
+woo_cobi2<-RunPCA(woo_cobi2)
+woo_cobi2<-IntegrateLayers(woo_cobi2, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+woo_cobi2<- FindNeighbors(woo_cobi2, reduction = "harmony", dims = 1:30)
+woo_cobi2<- FindClusters(woo_cobi2, resolution = 1, cluster.name = "harmony_clusters")
+woo_cobi2<- RunUMAP(woo_cobi2, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+woo_cobi2<-JoinLayers(woo_cobi2)
+DimPlot(woo_cobi2, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+DotPlot(woo_cobi2,features=c("KRT19","EPCAM","ALB","VIM","COL1A1","DCN","ACTA2","PECAM1","CD34","CD3E","CD4","CD8A","IL7R","KLRD1","CD79A","MS4A1","IGHA1","FCER1G","CD68","HLA-DRA","CD74","ITGAX","CLU","MS4A2","GZMB","MKI67","TOP2A","HBB"),group.by="harmony_clusters")+RotatedAxis()
+
+
+#remove unhealthy cluster
+woo_cobi2<-subset(woo_cobi2,subset=harmonyd_clusters%in% c("13","25"),invert=T)
+woo_cobi2[["decontXcounts"]]<-split(woo_cobi2[["decontXcounts"]],f=woo_cobi2$sample)
+woo_cobi2<-FindVariableFeatures(woo_cobi2)
+woo_cobi2<-ScaleData(woo_cobi2)
+woo_cobi2<-RunPCA(woo_cobi2)
+woo_cobi2<-IntegrateLayers(woo_cobi2, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+woo_cobi2<- FindNeighbors(woo_cobi2, reduction = "harmony", dims = 1:30)
+woo_cobi2<- FindClusters(woo_cobi2, resolution = 1, cluster.name = "harmony_clusters")
+woo_cobi2<- RunUMAP(woo_cobi2, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+woo_cobi2<-JoinLayers(woo_cobi2)
+DimPlot(woo_cobi2, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+DotPlot(woo_cobi2,features=c("KRT19","EPCAM","ALB","VIM","COL1A1","DCN","ACTA2","PECAM1","CD34","CD3E","CD4","CD8A","IL7R","KLRD1","CD79A","MS4A1","IGHA1","FCER1G","CD68","HLA-DRA","CD74","ITGAX","CLU","MS4A2","GZMB","MKI67","TOP2A","HBB"),group.by="harmony_clusters")+RotatedAxis()
+
+
+
+woo_cobi2$seurat_annotation<-NA
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("0","1","2","3","5","7","8","20")]<-"T/NK"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("9","10")]<-"T/NK"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("4")]<-"B"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("6","12","13","24")]<-"Cancer"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("18")]<-"Fibroblast"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("16")]<-"Endothelial"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("23")]<-"Granulocyte"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("22")]<-"Hepatocyte"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("11","15","19","25")]<-"Mono/Macro/cDC"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("21")]<-"pDC"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("17")]<-"Plasma"
+woo_cobi2$seurat_annotation[woo_cobi2$harmony_clusters%in%c("14")]<-"Proliferative"  
+
+p<-DimPlot(woo_cobi2, reduction="umap.harmonyd",group.by=c("seurat_annotation"),label=T,label.size=2,raster=F)+
+  theme(axis.text = element_text(size = 6),     # 軸の数値
+        axis.title = element_text(size = 6),    # 軸ラベル
+        legend.text = element_text(size = 6),   # 凡例ラベル
+        legend.title = element_text(size = 6),  # 凡例タイトル
+        plot.title = element_text(size = 6),
+  )+
+  coord_fixed()
+for (i in seq_along(p)) {
+  p[[i]]$layers[[1]]$aes_params$stroke <- 0.1
+}
+p
+
+p<-egg::set_panel_size(p,width= unit(4, "cm"), height= unit(3, "cm"))
+ggsave("Sup Fig 4A.pdf", plot = p, width = 8, height = 5, units = "cm",dpi=300)
+
+
+
+#devide Proliferative cells to cell cluster
+pro<-subset(woo_cobi2,subset=seurat_annotation%in% c("Proliferative"))
+table(pro$sample)
+pro<-FindVariableFeatures(pro)
+pro<-ScaleData(pro)
+pro<-RunPCA(pro)
+pro<- FindNeighbors(pro, reduction = "harmony", dims = 1:30)
+pro<- FindClusters(pro, resolution = 0.4, cluster.name = "harmony_clusters") #5clusters
+pro<- RunUMAP(pro, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(pro, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+DotPlot(pro,features=c("KRT19","EPCAM","ALB","VIM","COL1A1","DCN","ACTA2","PECAM1","CD34","CD3E","CD4","CD8A","IL7R","KLRD1","CD79A","MS4A1","IGHA1","FCER1G","CD68","HLA-DRA","CD74","ITGAX","CLU","MS4A2","GZMB","MKI67","TOP2A","HBB"),group.by="harmony_clusters")+RotatedAxis()
+pro$seurat_annotation[pro$harmony_clusters%in%c("0","1","2","3","6")]<-"T/NK"
+pro$seurat_annotation[pro$harmony_clusters%in%c("5")]<-"Plasma"
+pro$seurat_annotation[pro$harmony_clusters%in%c("4")]<-"B"
+woo_cobi2$seurat_annotation<-pro$seurat_annotation
+
+#Addmodulescore
+pORG<-list(c("TNFSF18","CST2","RPRD1B","BARD1","SORD2P","ZNF217","CHMP4B","SLFN13","MMEL1","SPATA24","OSER1","PHACTR3","PKIB","ARHGAP12","RBM41","MPZL3","GDE1","FGD6","PLAAT2","STAU1","ZG16B","RIOK3","ALOX5","CDS1","PIK3CB","HPGD","HIST1H1T","GID8","NUDT21","PAK1","CYP4F3","ARL17A","PLAAT3","SRP9","ANKRD18B","CCL20","CFB","SPOPL","CTNNBL1","NFE2L3","ACSL5","CIAO2A","SCOC","SAA4","PPP1R3C","WFDC13","FUNDC1","ADNP","DLEU7","NME7","EFNB2","LRRIQ1","MAP3K2","LNPK","ZDHHC13"))
+pSUB<-list(c("RHCGKRT17","GJB6","P2RY2","S100A3","C16orf74","NXPH4","HES2","PPP1R14B","DNER","FSCN1","TMPRSS11E","KRT6A","KRT7","GJB2","GSDMC","SEMA3F","KRT6C","BANF1","RHOV","PC","TNFRSF6B","PLXNA1","DENND2C","FHOD3","HAS3","PLAU","NRP2","KYNU","PORCN","SYT12","LVRN","TBC1D2","LPAR3","RAC3","SLC16A3","KYAT1","GPR153","SLCO1C1","PHKA1","PLEKHG5","NIBAN2","CNTNAP3","STRIP2","CALB2","USP31","EGFR","LRRC8A","FGFBP1","CSNK1E","COL7A1"))
+sc_Basal<-list(c("KRT6A","S100A2","KRT13","KRT17","LY6D","KRT7","KRT5","FAM83A","CD109","GAPDH","CSTA","PTPN13","MTSS1","SPRR1B","SLC2A1","CAV1","EMP1","SEMA3C","DHRS9","CAST","FLNA","SLITRK6","COL7A1","AQP3","MT2A","AHNAK2","KRT19","PKP1","YBX3","GJB5"))
+sc_Classical<-list(c("LGALS4","CTSE","TFF1","AGR2","TSPAN8","CEACAM6","LYZ","CDH17","TFF2","CLDN18","REG4","SPINK1","SLC44A4","GPX2","ANXA10","FAM3D","TFF3","MUC13","ANXA13","CEACAM5","VSIG2","PRSS3","ALDH2","IL1R2","AGR3","CYSTM1","CAPN5","S100A6","ONECUT2","BCAS1"))
+IC<-list(c("VCAM1","MALAT1","IGFBP3","SYNE2","TIMP2","TNFAIP2","NFAT5","SERPINA1","CXCL14","CX3CL1","ALPK3","ATHL1","DPYSL2","TMEM139","KLF6","KRT23","MEGF6","HOXB2","PADI1","MFSD4","INPP4B","BAIAP3","HMHA1","ECE1","CAMK2N1","SNORD89","WFDC2","TSHZ2","RILPL2","LAMB2"))
+basal_Moffitt <-list(c("VGLL1","UCA1","S100A2","LY6D","SPRR3","SPRR1B","LEMD1","KRT15","CTSL2","DHRS9","AREG","CST6","SERPINB3","KRT6C","KRT6A","SERPINB4","FAM83A","SCEL","FGFBP1","KRT7","KRT17","GPR87","TNS4","SLC2A1","ANXA8L2"))
+classical_Moffitt<-list(c("BTNL8","FAM3D","PRR15L","AGR3","CTSE","LOC400573","LYZ","TFF2","TFF1","ANXA10","LGALS4","PLA2G10","CEACAM6","VSIG2","TSPAN8","ST6GALNAC1","AGR2","TFF3","CYP3A7","MYO1A","CLRN3","KRT20","CDH17","SPINK4","REG4"))
+QM_Collisson<-list(c("AIM2","FAM26F","GPM6B","S100A2","KRT14","CAV1","LOX","SLC2A3","TWIST1","PAPPA","NT5E","CKS2","HMMR","SLC5A3","PMAIP1","PHLDA1","SLC16A1","FERMT1","HK2","AHNAK2"))
+classical_Collisson<-list(c("AGR2","ATP10B","CAPN8","CEACAM5","CEACAM6","ELF3","ERBB3","FOXQ1","FXYD3","GPRC5A","GPX2","LGALS4","MUC13","ST6GALNAC1","TFF1","TFF3","TMEM45B","TOX3","TSPAN8","SDR16C5","S100P","PLS1"))
+
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = pORG,nbin=25,ctrl = 100,name = "pORG")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = pSUB,nbin=25,ctrl = 100,name = "pSUB")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = sc_Basal,nbin=25,ctrl = 100,name = "sc_Basal")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = sc_Classical,nbin=25,ctrl = 100,name = "sc_Classical")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = IC,nbin=25,ctrl = 100,name = "IC")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = basal_Moffitt,nbin=25,ctrl = 100,name = "basal_Moffitt")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = classical_Moffitt,nbin=25,ctrl = 100,name = "classical_Moffitt")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = QM_Collisson,nbin=25,ctrl = 100,name = "QM_Collisson")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = classical_Collisson,nbin=25,ctrl = 100,name = "classical_Collisson")
+
+woo_cobi2$pre_post<-NA
+woo_cobi2$pre_post[woo_cobi2$sample%in% c("Pt5_pre","Pt6_pre","Pt7_pre","Pt8_pre","Pt9_pre","Pt11_pre","Pt12_pre","Pt13_pre")]<-"pre"
+woo_cobi2$pre_post[woo_cobi2$sample%in% c("Pt6_post","Pt7_post","Pt8_post","Pt9_post","Pt10_post","Pt11_post","Pt12_post","Pt13_post")]<-"post"
+
+# addmodulescore of hallmark
+library(data.table)
+library(msigdbr)
+inpGS <- data.table(msigdbr(species = "Homo sapiens", category = "H"))
+inpGS <- inpGS[grep("HALLMARK", gs_name)]
+inpGS$gs_name <- gsub("HALLMARK_", "", inpGS$gs_name)
+inpGS$gs_name <- gsub("_SIGNALING", "", inpGS$gs_name)
+inpGS <- split(inpGS$gene_symbol, inpGS$gs_name)
+woo_cobi2 <- AddModuleScore(woo_cobi2, nbin=25,features = inpGS, name = "HALLMARK")
+colnames(woo_cobi2@meta.data)[grep("HALLMARK", colnames(woo_cobi2@meta.data))] <- names(inpGS)
+
+#Science KRAS signature
+PDAC_KRAS_UP<-list(c("NT5E","ETV1","STARD3NL","PTX3","HMGA2","SCML1","TMEM156","NAV3","SETD9","ITGB3BP","TNS4","SCML2","RAD51","NCEH1","TOX","RAP1B","FOSL1","REXO5","MCTP1","WDR12","PCNX4","RAB1A","CBFB","ETV4","CALB2","RGS2","SPRY4","ITGA2","EREG","PLEKHA3","TLR6","CCND1","QARS1","FRRS1","MYBL1","KIF2C","DENND6A","FABP5","HSBP1","STEAP1","UBASH3B","GOLM2","TMA16","WDR45B","TMEM131","OTUD6B","RHEBL1","MTMR9","ITGB8","CPNE8","SERPINB8","NUF2","SPRED2","UBE2K","KBTBD8","E2F7","OGFOD1","C4orf46","FEZ2","DKK1","EFR3A","MSL3","MZT1","TMED2","RMND5A","CD83","SEPTIN8","WEE1","CCDC117","ERGIC2","CDC25A","ACOX2","NCR3LG1","LRWD1","GPR19","ANAPC16","PIP4K2A","C17orf58","FEN1","MND1","JAZF1","CEP128","UNKL","BIRC3","C3orf38","ADCK1","EMP1","FAM72D","MCM10","TCN1","LBR","SLC7A11","C11orf1","HIRA","RFWD3","NOG","FYTTD1","CENPH","PMAIP1","FAM3C","GRPEL2","RNF13","MMP2","RPIA","VEPH1","EIF5","NSMAF","ARHGAP19","NOC3L","GPAT3","DGKD","MXD1","POLR2A","NPAS2","TGFA","STAMBPL1","ANXA1","FGFBP3","API5","AMPD3","HMGB2","RUNX1","MEMO1","DEPDC1","H2AX","COL4A1","DEGS1","PRR11","GPR75","SACM1L","AREG","ANTXR2","ADAT2","NAB1","SPRED1","SPATA5","ZC3H15","ENOSF1","GRAMD2B","PHLPP1","","ORMDL1","DDX21","AURKB","DICER1","CAPZA1","RPL22L1","COMMD5","UGT8","TEX30","DCAF16","TRDMT1","WWC1","CDK6","ERRFI1","DSCC1","SPC24","DCBLD1","TUBD1","TCHP","RASSF8","MEX3D","ACADM","MAP3K5","DDIAS","WDR41","FAM72B","TET1","DEPDC1B","LCA5","REST","RBMS2","TDP2","PRTFDC1","AMN1","DDAH1","STX3","FBXO45","RNF11","CHEK1","PDE4B","UBE2T","HNRNPA3","FAM72A","AKR1A1","KIF3A","NT5DC3","S100A16","N4BP2","CMTM7","NABP1","DBF4","SKA1","PSIP1","PATL1","NCAPH","IMPA1","CCDC14","SPDL1"))
+PDAC_KRAS_DOWN<-list(c("SYT7","ERMARD","PLCD1","H3C6","ZFAND6","FUT2","TOB1","LMTK3","HERPUD2","RAB40B","INHBB","SSH3","PACS2","MED15","TRIM62","NACC2","ATF2","ZFPM1","RBM38","NFIB","ASH1L","ZNF837","PWWP2B","LRRC26","NPTXR","RBM15B","DAGLA","ICAM5","TNNC1","FBXO2","CPS1","PACSIN1","PJA2","MUC1","CRIP2","GARNL3","RALGPS1","VASN","PLEKHM1","AQP3","RTF1","KIAA0100","ANKRD46","SCUBE3","RAB37","PPFIA3","SHOX2","ELF3","METTL16","TACC2","DUSP9","OSGIN2","TNRC6C","CERS4","ATE1","FSCN2","LMF1","PTBP3","THEMIS2","CTIF","RGS9BP","ALCAM","NAT8L","UCK1","TMEM41A","MRPS6","ULK1","SEPTIN5","PAOX","CORO2A","IGSF9","CASKIN1","SNRNP27","PDZK1IP1","RASSF2","CHRM4","MMEL1","RAB15","MPP2","ADCY9","MRAS","SMPD3","RNF144A","SYNPO","MFSD6","NICN1","SEMA4F","LGALS9","SNAI3","SHISA5","VSTM2L","POLR3E","ROBO1","SEC63","PLXNB2","KRCC1","ABAT","CAPN5","MATN2","TINCR","CCDC149","ZSWIM8","ATP1B1","CELSR2","ZNF425","BMF","CYB5R4","CPNE2","TMEM50B","KREMEN2","ADAP2","CCDC87","FOXO6","XPR1","LDHD","SECTM1","CNNM4","ASAP3","TMEM184B","PANK3","RAB26","MAPK8IP1","NT5DC2","TOP1MT","PRRT2","RHOB","TJP3","GOLGA4","GPRC5C","NATD1","DUSP8","BSN","SS18L1","KCNH3","EHD3","ERMP1","MOGS","WIPF3","YPEL2","SNPH","RASD2","NYAP1","DEPP1","CARMIL3","DISC1","LRFN1","LY6D","HCN2","DAPK2","FAM171B","APC2","LSM14A","DHX40","IQSEC1","TNXB","PALM","TMEM151A","MEIS3","ZDHHC20","SLC29A4","ELOVL7","ZNF467","MAPK3","SLC41A1","TMEM191B","SAR1B","CPLX1","LYNX1-SLURP2","THG1L","HSPE1-MOB4","GDF11","MAPK8IP2","NUDT15","SCAMP1","TMEM170B","ANO10","ZDHHC1","HS6ST1","FGFR3","TLN1","KCNQ1","GPR37L1","SDK2","ISM2","SAMD11","TMEM229B","SPTBN4","ADRA2C","IL10RB","CLIC3","TP53INP1","PXYLP1","STEAP3","SCN1B","HIPK3","EMP2","EXOC3L1","CHPF","KCNK3","NPPC"))
+PDAC_KRAS_ERK_UP<-list(c("AADAT","ACOX2","ADAT2","ADORA2B","AEN","AK2","AKAP12","AMD1","ANTXR2","AP1S2","AREG","ARHGAP11A","ASPH","ATAD5","AURKB","B3GLCT","BMAL2","BRCA1","BUB1","C3orf52","C4orf46","CACYBP","CALB2","CBFB","CBL","CCDC138","CCNA2","CCND1","CD83","CDC20","CDC25A","CDC45","CDCA5","CDCA7","CDCA8","CDK17","CDK6","CENPH","CENPK","CENPM","CENPQ","CENPU","CENPV","CEP128","CEP135","CEP78","CHAC2","CHEK1","CHUK","CIP2A","CKAP2L","CLPB","CLSPN","CMTM7","COPS3","COTL1","CTNNAL1","DBF4","DCBLD1","DCUN1D5","DDIAS","DDX11","DDX21","DEPDC1B","DGKD","DKC1","DKK1","DSCC1","DTL","E2F7","EBNA1BP2","ECT2","EDEM1","EFNB2","EIF5","ELK3","ELL2","EME1","EMP1","EPB41L2","EREG","ERRFI1","ETV1","ETV4","EXO1","EXOSC3","EZH2","FABP5","FAM3C","FAM72A","FAM72D","FARSB","FAS","FBXO45","FEN1","FGFBP3","FOSL1","FUT4","GAR1","GCLM","GINS1","GINS2","GINS3","GINS4","GPAT3","GPATCH11","GPD2","GPR75","GRPEL2","H2AX","H2AZ1","HAUS5","HJURP","HMGA1","HMGA2","ITGA2","ITPRID2","KBTBD8","KIF15","KIF22","KIF23","KIF2C","KNSTRN","LBR","LIF","LMNB1","LRWD1","LSM11","LYAR","LYPLA1","MAK16","MAP4K4","MBLAC2","MBNL1","MCM10","MCM6","MCM7","MCMBP","MCTP1","MELK","MND1","MNS1","MORC4","MPHOSPH6","MSN","MYBL1","MYC","MYO10","NAA15","NAV3","NCAPG","NCAPH","NCEH1","NCR3LG1","NIP7","NOC3L","NOG","NOM1","NOP16","NPAS2","NSMAF","NT5DC3","NT5E","NUF2","NUP35","NUP98","ODC1","OGFOD1","ORC6","OSBPL3","OSGEP","OTUD6B","PAK1IP1","PALS2","PAXIP1","PHC2","PINX1","PLK4","PMAIP1","PNO1","POLA2","POLE2","POLQ","PRELID1","PRIM2","PRR11","PRTFDC1","PSMC3IP","PSMD14","PTX3","QSER1","RAC2","RAD1","RAD18","RAD51","RAD51AP1","RAD54B","RAD54L","RAPH1","RASA2","RASSF8","RBBP8","REXO5","RFC3","RFC4","RFC5","RFWD3","RGS20","RHEBL1","RNF138","ROR1","RPIA","RPL22L1","RRM1","RRM2","RUNX1","S100A16","SASS6","SCML1","SENP1","SERPINB8","SFR1","SH3KBP1","SHCBP1","SKA1","SKP2","SLC25A10","SLC25A19","SLC35G1","SLC7A11","SLCO4A1","SMIM29","SMS","SNRPD1","SNX10","SPATA5","SPC24","SPDL1","SPRED1","SPRED2","SPRY4","STAMBPL1","STEAP1","STK17A","TAF1A","TCHP","TCN1","TEAD4","TEX30","TGFA","TIPIN","TMA16","TNFRSF10A","TNFRSF12A","TNS4","TOP1","TUBA1B","U2SURP","UBASH3B","UBE2C","UBE2N","UBE2T","UCHL5","UHRF1","UPP1","UTP4","VMA21","VRK1","WDHD1","WDR12","WDR76","XRCC2","XRCC4","ZGRF1","ZNF215","ZWILCH","ZWINT"))
+PDAC_KRAS_ERK_DOWN<-list(c("AASS","ABAT","ABCA5","ABTB1","ACSF2","ACSS2","AGO4","AKTIP","ALCAM","ALDH6A1","ALDOC","ANO10","ANXA9","APOL1","ARHGEF10L","ARHGEF17","ARRB1","ASAP3","ASS1","ATF2","B4GAT1","BCAM","BCL2L11","BET1","BMF","CA11","CABLES1","CACFD1","CADM4","CALCOCO1","CAPN5","CARMIL3","CASKIN1","CCDC87","CDK18","CELSR2","CERCAM","CERS4","CHST12","CITED2","CKB","CLIC3","CLIP2","CLSTN3","CNNM2","CNTNAP1","CORO2A","CPS1","CTIF","CTSH","CTSO","CXXC5","CYB5D2","CYBC1","CYBRD1","DAGLA","DAPK2","DBP","DCAF11","DENND6B","DEPP1","DGLUCY","DHRS3","DHX40","DNAI4","DNAJC18","DNASE2","DOK4","DUSP8","DUSP9","EFNA3","ELF3","ENTPD8","EPB41L1","EPHX1","ERBB2","ERMP1","EVA1B","EVI5L","EXOC3L1","EXOC4","FAM171A2","FAM171B","FBXL8","FBXO2","FBXO44","FBXO6","FN3K","FOXN3","FOXO4","FOXO6","FSCN2","FUT2","FZD2","GARNL3","GKAP1","GNS","GPR37L1","GPRC5C","GRN","GRTP1","GSDMB","H2BC21","H2BC5","H3C6","H4C14","HBP1","HCN3","HDAC11","HDAC5","HECA","HEXD","HID1","HLA-E","HMOX1","HS1BP3","HS6ST1","HSD3B7","ICAM5","IFI30","IGSF9","IL10RB","IL11RA","IL17RC","INHBB","INPP5J","INPPL1","INSR","IQSEC2","IRF2BPL","JMY","JUND","KAT2B","KATNIP","KCNC3","KDM4A","KHNYN","KIAA0513","KIF3C","KLHL24","KRCC1","KREMEN1","KRT19","LAMA5","LAMB2","LDHD","LGALS3","LGALS9","LMF1","LMTK3","LRP1","LY6D","LZTS3","MAGED2","MAPK3","MAST1","MATN2","MCF2L","MISP3","MKNK2","MMP11","MRAS","MSMO1","MTHFR","MTURN","MUC1","MVP","MXD4","MYH14","NATD1","NDRG4","NECAB3","NEU1","NICN1","NLGN2","NPTXR","NR2F2","NYAP1","OBSL1","OSBPL7","P2RX4","P4HTM","PACSIN1","PALM","PAOX","PARP10","PBXIP1","PDGFRL","PDZK1IP1","PFKFB4","PGRMC2","PIK3R3","PJA2","PLBD1","PLCD1","PLPP1","PLXNB1","PNPLA2","PNRC1","POR","PPARA","PPFIA3","PPM1L","PPP2R5B","PRRT2","PTPN6","PTPRH","R3HDM2","RAB11FIP4","RAB15","RAB26","RAB37","RAB3D","RAB40B","RALGDS","RALGPS1","RARG","REEP6","RGS9BP","RILP","RIT1","RNF103","RNF213","RNF39","ROBO1","SAMD11","SAMHD1","SCAMP1","SCAMP5","SECISBP2L","SECTM1","SEL1L","SEMA3F","SEMA4G","SEZ6L2","SHISA4","SHISA5","SHOX2","SLC11A2","SLC22A18","SLC22A23","SLC25A23","SLC25A29","SLC26A6","SLC29A3","SLC2A6","SLC43A2","SLC44A2","SMPD3","SNAI3","SNPH","SNTA1","SNX33","SOX12","SPAG16","SPIRE2","SPTBN4","SRD5A3","SSBP3","SSH3","SUOX","SWT1","SYNPO","SYT17","SYT7","TAPBP","TCIRG1","TGM1","THEMIS2","TINCR","TJP3","TM7SF2","TMEM170B","TMEM191B","TMEM229B","TMEM50B","TMEM9","TNFRSF14","TNNC1","TNNT1","TOB1","TP53INP1","TP53INP2","TRIM2","TRIM62","TRPM4","TSC22D4","ULK1","UNC93B1","VASN","VMAC","VPS8","VSIG10L","VSIR","YPEL2","ZDHHC1","ZER1","ZFAND6","ZFHX2","ZNF160","ZNF251","ZNF385A","ZNF425","ZNF467","ZNF517","ZNF605","ZSWIM8"))
+KRAS_ERK_median_rank_UP<-list(c("ABCE1","ACOX2","ADAT2","ADORA2B","AEN","AKAP12","ANTXR2","AREG","ARHGAP11A","ATAD5","AURKA","AURKB","BRCA1","BRIX1","BUB1","CALB2","CBFB","CCND1","CDC20","CDC25A","CDC45","CDC6","CDCA4","CDCA5","CDCA7","CDCA8","CDK2","CDT1","CENPH","CENPK","CENPM","CENPU","CEP128","CEP55","CHAC2","CHEK1","CKAP2L","CLSPN","CTNNAL1","CTPS1","DBF4","DDIAS","DDX21","DEPDC1B","DKC1","DKK1","DSCC1","DTL","E2F7","EBNA1BP2","ECT2","ELK3","EME1","EMP1","ERCC6L","EREG","ERRFI1","ETV1","ETV4","EXO1","EZH2","FAM3C","FAM72A","FAM72B","FAM72D","FANCI","FARSB","FAS","FEN1","FOSL1","GINS1","GINS2","GINS3","GINS4","GPAT3","H2AX","HJURP","HMGA1","HMGA2","HMGB2","IFRD2","ITGA2","KIF15","KIF23","KIF2C","KNSTRN","KNTC1","LIF","LYAR","MAD2L1","MAK16","MAP4K4","MCM10","MCM4","MCM5","MCM6","MCM7","MCM8","MCTP1","MELK","MND1","MRTO4","MSN","MTHFD1L","MYBL1","MYBL2","MYC","MYO10","MZT1","NAV3","NCAPG","NCAPH","NCEH1","NCR3LG1","NIP7","NME1","NOC3L","NOLC1","NOM1","NOP16","NOP56","NPAS2","NT5E","NUF2","ORC1","ORC6","PAICS","PAK1IP1","PALS2","PCNA","PHC2","PINX1","PLK4","PMAIP1","PNO1","PNP","POLA1","POLA2","POLE2","PRR11","PSMC3IP","RAD18","RAD51","RAD51AP1","RAD54L","RAI14","RFC3","RFC4","RFC5","RFWD3","RHEBL1","RRM1","RRM2","S100A16","SASS6","SERPINB8","SHCBP1","SKA1","SLC25A19","SLC35F2","SLC7A1","SLC7A11","SLCO4A1","SPC24","SPDL1","SPRED1","SPRED2","SPRY4","STAMBPL1","STEAP1","STK17A","TAF1A","TCF19","TCOF1","TEX30","TIPIN","TNFRSF10A","TNFRSF12A","TNS4","TOP1","TRIP13","TYMS","UBASH3B","UBE2C","UBE2T","UHRF1","UPP1","URB2","UTP4","VRK1","WDHD1","WDR4","WDR62","WDR76","XRCC2","ZGRF1","ZNF215","ZWILCH","ZWINT"))
+KRAS_ERK_median_rank_DOWN<-list(c("ABAT","ABCA5","ACSF2","ALDH6A1","ANXA9","ARHGEF10L","ARHGEF17","ARRB1","ARSA","ASAH1","ASAP3","ASS1","ATOSA","BCAM","BCL2L11","BMF","CA11","CACFD1","CALCOCO1","CAPN5","CCDC149","CELSR2","CERCAM","CHST12","CKB","CLIC3","CLIP2","CLSTN3","CNTNAP1","CRIP2","CTIF","CTSH","CTSO","CXXC5","DAGLA","DAPK2","DBP","DCAF11","DENND6B","DGLUCY","DNAI4","DNASE2","DOK4","DUSP8","ELF3","ENTPD8","EPB41L1","EPHX1","ERBB2","ERBB3","FBXL8","FBXO2","FBXO44","FN3K","FOXN3","FOXO4","FOXO6","FSCN2","FUT2","FZD2","GAA","GARNL3","GKAP1","GLMP","GPR37L1","GRN","H2BC21","H2BC5","H3C6","H4C14","HBP1","HDAC11","HDAC5","HEXD","HID1","HLA-E","HMOX1","HS1BP3","HSD3B7","IL10RB","IL11RA","IL17RC","INPP5J","INPPL1","INSR","IQSEC2","IRF2BPL","KDM4A","KLHL24","LAMA5","LAMB2","LDHD","LLGL2","LMF1","LMTK3","LRP1","LZTS3","MAGED2","MATN2","MCF2L","MIEF2","MRAS","MTHFR","MTURN","MUC1","MVP","MXD4","MYH14","NATD1","NDRG4","NEU1","NICN1","NYAP1","OSBPL7","P2RX4","PACSIN1","PALM","PAOX","PBXIP1","PDZK1IP1","PIK3C2B","PIK3R3","PLCD1","PLPP1","PNPLA2","PNRC1","PPM1L","PRRT2","PTPN6","PTPRH","RAB11FIP4","RAB15","RAB26","RAB37","RAB40B","RALGDS","RALGPS1","RARG","REEP6","RILP","RNF103","RNPC3","SCAMP5","SCRN2","SECTM1","SEMA3F","SEZ6L2","SHISA4","SIX5","SLC25A23","SLC25A29","SLC29A3","SLC43A2","SLC44A2","SLC66A3","SMPD3","SNTA1","SOX12","SPAG16","SPIRE2","SPSB3","SSBP3","SSH3","SUOX","SWT1","SYNPO","SYT17","TAPBP","TCIRG1","THRA","TJP3","TMEM120A","TMEM229B","TMEM94","TNFRSF14","TNNC1","TP53INP1","TP53INP2","TRIM62","TRPM4","TSC22D4","ULK1","VASN","VMAC","VSIG10L","VSIR","YPEL2","ZDHHC1","ZER1","ZFTRAF1","ZFYVE1","ZNF211","ZNF251","ZNF358","ZNF425","ZNF467","ZNF517","ZNF658","ZSWIM8"))
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = PDAC_KRAS_UP,nbin=25,ctrl = 100,name = "PDAC_KRAS_UP")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = PDAC_KRAS_DOWN,nbin=25,ctrl = 100,name = "PDAC_KRAS_DOWN")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = PDAC_KRAS_ERK_UP,nbin=25,ctrl = 100,name = "PDAC_KRAS_ERK_UP")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = PDAC_KRAS_ERK_DOWN,nbin=25,ctrl = 100,name = "PDAC_KRAS_ERK_DOWN")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = KRAS_ERK_median_rank_UP,nbin=25,ctrl = 100,name = "KRAS_ERK_median_rank_UP")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = KRAS_ERK_median_rank_DOWN,nbin=25,ctrl = 100,name = "KRAS_ERK_median_rank_DOWN")
+
+woo_cobi2[["pORG"]]<-woo_cobi2[["pORG1"]]
+woo_cobi2[["Intermediate Co-expressor score"]]<-woo_cobi2[["IC1"]]
+woo_cobi2[["scClassical-scBasal Commitment score"]]<-woo_cobi2[["sc_Classical1"]]-woo_cobi2[["sc_Basal1"]]
+
+#HLA
+HLA<-list(c("HLA-A","HLA-B","HLA-C","HLA-E","HLA-F","HLA-G","B2M"))
+HLA2<-list(c("HLA-DMA","HLA-DMB","HLA-DOA","HLA-DOB","HLA-DPA1","HLA-DPB1","HLA-DQA1","HLA-DQA2","HLA-DQB1","HLA-DQB2","HLA-DRA","HLA-DRB1","HLA-DRB5","CD74"))
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = HLA,nbin=25,ctrl = 100,name = "HLA")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = HLA2,nbin=25,ctrl = 100,name = "HLA2")
+woo_cobi2[["HLAI"]]<-woo_cobi2[["HLA1"]]
+woo_cobi2[["HLAII"]]<-woo_cobi2[["HLA21"]]
+
+
+
+
+
+#BR_UP signature (p<0.05,FC>1,n=348) (n=419)
+BR_UP<-list(c("CDC16","MVB12B","TMEM243","NARF","MAP3K13","LEPROTL1","ABHD3","KIF3C","DLEC1","CLDN14","AHNAK","ZNF540","UBXN8","N4BP2L1","PLEKHM1P1","BCLAF3","KCTD4","APOL4","MKRN2OS","WSB1","EPS8","GRIA3","TBXAS1","MAFG","TMPPE","BIN3","ATP11B","KMT5B","MTHFS","BNIP3L","POC1B","NAT1","CTNND1","C11orf52","GYG2","TSPOAP1-AS1","KPNA2P3","HACD4","ARSD","DOCK5","SLC22A31","TNK2","ZNF395","TSPAN3","VMP1","MYO5C","PNPLA1","BAIAP3","RIPK3","SYCE1L","USP12","LY6G5B","ELF1","TNFRSF10C","PRDM4-AS1","RPL9","SMIM18","DNAJC22","STPG2","BPTFP1","TRPV3","ADPRHL1","SHROOM4","TLDC2","PIK3CG","LRP2BP","AVPR2","FDFT1","FAM149A","AKAP1","STEAP2","TLR3","OBI1-AS1","RPL4P4","FAM135A","ARGLU1","PCTP","APBB1","NCR1","TMEM35B","GRIK4","DPP6","ARHGAP27P1-BPTFP1-KPNA2P3","TMEM44-AS2","SH2D4A","ANO7","PRR34-AS1","ACOT1","FUT10","GPAT3","PPM1N","GALNT12","MELTF","ALDOC","SMIM5","THAP12P7","FAM86B1","DMTN","CCDC122","BDKRB2","EEF1A1P11","LINC03034","SPDYE8","TSSC2","TMEM98","P3H2","TRIM34","MFHAS1","RIMBP2","MATN2","ZNF415","NAALADL2","L3MBTL4","SLC9A9","SLC66A1L","GAS6-AS1","TRIM67","TMEM97","LSAMP","FADS2","SEMA6D","STOX2","PIGZ","ATP6V1C2","RBBP4P2","TMEM37","LXN","PHETA1","EEF1A1P25","PLA2R1","YPEL3","POC1B-GALNT4","ZNF208","VWA7","ZNF860","ZNF781","CHRDL1","CCDC80","FAM157C","PALM3","MTAP","BCAN-AS2","ALDH1A1","DRD1","RPL21","CCNI2","PRR29","MSH5-SAPCD1","G0S2","TNFRSF11B","OR52I1","RPS3AP34","EPHX4","CARD11-AS1","CHGA","MYBPHL","PCOTH","PPP1R3G","CREG2","C9orf152","CA3","TTC3P1","UBQLN4P1","MAP6","SCAND2P","PCDH10","SRL","ZNF404","CD300E","FCHO1","SDR42E1","LY6G5C","OR13A1","RETREG1","ZNF160","ZNF600","TICAM2","ELF5","PPARG","PCDHB14","UGT1A9","POTEKP","ASPHD1","PCDHGA2","WFDC13","TXNRD1","CA13","ISL1","CCSER1","LRRC66","SIM2","ZDHHC2","PPP1R36","PCDH20","PTH2R","GALNT4","RPL7AP62","PPIAP42","GOLGA8K","ALPK3","H2BC7","PSPC1P1","SPINK13","PKIA","KRTAP5-7","MUC20P1","BTF3L4P1","CA1","AOC1","ZNF114","SPSB4","ITM2A","SCIN","ANKRD20A11P","UNC45B","CENPCP1","MCPH1-AS1","PLA2G10","ENTREP2","ZNF320","SUGT1P3","KBTBD12","ZNF85","R3HDML","VAX2","SPDYE18","LRRC31","SLC26A8","ULK4P2","CES1","KIAA0319","HOXB9","FAM81B","HS3ST5","HKDC1","CHRNA3","CDH15","H4C6","MUC12","PCDHB4","UPK3BP1","ASIC2","UGT1A4","ZNF257","PTGER3","ZNF610","BCO1","BMX","ERC2","CXCR2","BCL2L15","MMP1","LTB","GATA4","TEX55","CYP27C1","EIF4HP1","PLK5","ZNF69","KCNA2","A4GNT","FAM3B","LINC02980","USP44","SEC14L6","PDIA2","ANKRD20A21P","MAPK6P3","SAMD5","WNT2","SLC15A1","BEND6","SCN3A","PTPRR","CX3CR1","RBMXP4","WNT11","TNNC2","TEX15","UBE2R2-AS1","ZNF321P","XKR9","NRG4","PNMA2","INSRR","TUSC3","UBE2V1P2","CD8B","EIF3CL","FA2H","KCNH6","ZFP41","DNAJB13","NEFM","DKK4","OCA2","H3C7","CD7","WT1","HOXA13","ADRB3","HOXA7","PCDHB11","TKTL2","EVX1","TXN2P1","MRLN","ANTXRL","APOBEC1","TERF1P5","RPL35P5","ITLN1","MYOG","C12orf42","H2BC9","MAD2L1-DT","FGF20","HMGB1P1","BTNL3","CPB1","NDUFA5P11","CTCFL","DIO3","RPL9P28","ZNF285CP","MIR6769A","NHERF4","ZNF626","ST8SIA2","LEFTY1","IRS4","CSNK1A1L","IL1R2","PLCH1","PRSS3","DUOXA1","KCNIP1","ANKRD20A7P","LOXHD1","SPINK1","RPS3AP47","PTGIS","NPM1P25","CALHM3","CLPSL1","KRTAP5-9","TTLL6","RIPPLY3","SLC38A5","CLDN6","FTH1P8","CCN6","ZNF709","CLDN18","EEF1A1P50","MAP7D2","C4orf50","FAM47C","NELL1","TRBV29OR9-2","RBFOX1","VWA5B1","OR7E125P","ANXA10","EFCAB5","LRRC37A15P","SETP20","BNIP5","ANKRD20A6P","C11orf86","ZNF969P","HOXD10","CASP14","RPL32P34","ALX1","KRTAP10-2","BSND","FAM90A24P","RFLNA","GAPDHP62","OLFM4","RPSAP4","PPIAP46","PRKCG","KRTAP10-4","MAGEA5P","CLPS","FOXI2","RPL17P8","STOML3","BNIP3P1","KRTAP5-10","FMN2","SPATA31A7","OLIG1","ZNF705D","POTED","KCNK10","RPL10P8","ZNF534","MUC17","ITGAL-AS1","RN7SL465P","PPIAP72","GOT1L1","GUSBP14","LGALS9DP","PRAC2","SEC22B3P","BORCS7-ASMT","ATP6V1G3","REG4","H3C4","PLAAT5","MUCL3","CD8B2","PNLIP","ZNF225-AS1","FAM90A13P"))
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = BR_UP,nbin=25,ctrl = 100,name = "BR_UP")
+####Fig 3G
+p<-FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features="BR_UP1",na_cutoff = NA,raster=F)+
+  theme(axis.text = element_text(size = 6),     # 軸の数値
+        axis.title = element_text(size = 6),    # 軸ラベル
+        legend.text = element_text(size = 6),   # 凡例ラベル
+        legend.title = element_text(size = 6),  # 凡例タイトル
+        plot.title = element_text(size = 6),
+  )+
+  coord_fixed()
+for (i in seq_along(p)) {
+  p[[i]]$layers[[1]]$aes_params$stroke <- 0.1
+}
+p
+
+p<-egg::set_panel_size(p,width= unit(4, "cm"), height= unit(3, "cm"))
+ggsave("Fig 3G.pdf", plot = p, width = 7, height = 5, units = "cm",dpi=300)
+
+VlnPlot(woo_cobi2,group.by="sample",features="BR_UP1") 
+woo_cobi2$KRAS_ERK_median_rank_UP<-woo_cobi2$KRAS_ERK_median_rank_UP1
+woo_cobi2$PDAC_KRAS_UP<-woo_cobi2$PDAC_KRAS_UP1
+woo_cobi2$PDAC_KRAS_ERK_UP<-woo_cobi2$PDAC_KRAS_ERK_UP1
+woo_cobi2$KRAS_ERK_median_rank_DOWN<-woo_cobi2$KRAS_ERK_median_rank_DOWN1
+woo_cobi2$INTERFERON_ALPHA<-woo_cobi2$INTERFERON_ALPHA_RESPONSE
+woo_cobi2$INTERFERON_GAMMA<-woo_cobi2$INTERFERON_GAMMA_RESPONSE
+library(viridis)
+p<-FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features=c("KRAS_ERK_median_rank_UP","E2F_TARGETS","PDAC_KRAS_ERK_UP","G2M_CHECKPOINT","MYC_TARGETS_V1","MYC_TARGETS_V2","INTERFERON_ALPHA_RESPONSE","INTERFERON_GAMMA_RESPONSE","UNFOLDED_PROTEIN_RESPONSE","PDAC_KRAS_UP","TNFA_VIA_NFKB","SPERMATOGENESIS","APOPTOSIS","P53_PATHWAY","PANCREAS_BETA_CELLS","CHOLESTEROL_HOMEOSTASIS","KRAS_ERK_median_rank_DOWN","FATTY_ACID_METABOLISM","XENOBIOTIC_METABOLISM","BILE_ACID_METABOLISM"),na_cutoff=NULL,combine=F)
+plots <- lapply(p, function(p) {
+  p + coord_fixed() +
+    theme(
+      axis.text = element_text(size = 5),
+      axis.title = element_text(size = 5),
+      plot.title = element_text(size = 6),
+      legend.key.width = unit(0.1, "cm")
+    ) +
+    labs(x = "umap 1", y = "umap2")+
+    guides(
+      color = guide_colorbar(
+        barwidth = 0.2,   # バーの幅
+        barheight = 2,    # バーの高さ
+        title.theme = element_text(size = 5),
+        label.theme = element_text(size = 5)
+      ))
+}) 
+final_plot <- wrap_plots(plots, ncol = 4)
+final_plot
+ggsave("Sup Fig 4B.pdf", plot = final_plot, width = 16, height = 24, units = "cm",dpi=300)
+
+
+FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features=c("PANCREAS_BETA_CELLS","CHOLESTEROL_HOMEOSTASIS","KRAS_ERK_median_rank_DOWN1","FATTY_ACID_METABOLISM","XENOBIOTIC_METABOLISM","BILE_ACID_METABOLISM"))+coord_fixed()+
+  theme(axis.text = element_text(size = 6),     # 軸の数値
+        axis.title = element_text(size = 6),    # 軸ラベル
+        legend.text = element_text(size = 6),   # 凡例ラベル
+        legend.title = element_text(size = 6),  # 凡例タイトル
+        plot.title = element_text(size = 6)
+  )+labs(x = "umap 1", y = "umap 2")
+
+FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features="CHOLESTEROL_HOMEOSTASIS")+coord_fixed() 
+FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features="KRAS_ERK_median_rank_DOWN1")+coord_fixed() 
+FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features="FATTY_ACID_METABOLISM")+coord_fixed() 
+FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features="XENOBIOTIC_METABOLISM")+coord_fixed() 
+FeaturePlot_scCustom(woo_cobi2,reduction="umap.harmonyd",features="BILE_ACID_METABOLISM")+coord_fixed() 
+
+
+#inferCNV
+woo_cobi2$seurat_annotation1<-"Normal"
+woo_cobi2$seurat_annotation1[woo_cobi2$seurat_annotation=="Cancer"]<-"Cancer"
+Idents(woo_cobi2)<-"seurat_annotation1"
+dataset_list <- SplitObject(woo_cobi2, split.by = "sample")
+saveRDS(dataset_list,"~/Desktop/Sears lab/Experiment/single cell RNA seq/Pt5_36/dataset_list.rds")
+setwd("~/Desktop/Sears lab/Experiment/single cell RNA seq/Pt5_36/inferCNV")
+
+
+dataset <- dataset_list$Pt7_pre
+Idents(dataset)<-"seurat_annotation1"
+
+gene_order_file <- "~/Desktop/Sears lab/Experiment/single cell RNA seq/inferCNVgeneorderingfile/hg38_gencode_v27.txt"
+
+infercnv_obj <- CreateInfercnvObject(
+  raw_counts_matrix = GetAssayData(dataset, layer = "counts",assay="decontXcounts"),
+  annotations_file = as.matrix(dataset@active.ident),
+  delim = "\t",
+  gene_order_file = gene_order_file,
+  ref_group_names = c("Normal")
+)
+
+output_dir <- paste0("infercnv_output_", i)
+dir.create(output_dir)
+
+try({infercnv_obj <- infercnv::run(
+  infercnv_obj,
+  cutoff = 0.1,
+  min_cells_per_gene = 10,
+  out_dir = output_dir,
+  num_threads=4,
+  denoise = TRUE,
+  HMM = TRUE,
+  write_expr_matrix = T,
+  analysis_mode = "subclusters",
+  tumor_subcluster_partition_method='random_trees',
+  BayesMaxPNormal = 0.2,
+  plot_steps = FALSE,no_prelim_plot = TRUE, png_res = 300
+)})
+infercnv_obj <- infercnv::run(
+  infercnv_obj,
+  cutoff = 0.1,
+  min_cells_per_gene = 10,
+  out_dir = output_dir,
+  num_threads=4,
+  denoise = TRUE,
+  HMM = TRUE,
+  write_expr_matrix = T,
+  analysis_mode = "subclusters",
+  tumor_subcluster_partition_method='random_trees',
+  BayesMaxPNormal = 0.2,
+  plot_steps = FALSE,no_prelim_plot = TRUE, png_res = 300
+)
+
+
+
+
+#RNA-seq cobi-signature apply to scRNA-seq (Supplementaly Figure 3B)
+BR_UP<-readRDS("~/Desktop/Sears lab/Experiment/RNAseq/BR_signature/BR_UP.rds")
+BR_DOWN<-readRDS("~/Desktop/Sears lab/Experiment/RNAseq/BR_signature/BR_DOWN.rds")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = BR_UP,nbin=25,ctrl = 100,name = "BR_UP")
+woo_cobi2 <- AddModuleScore(object = woo_cobi2,features = BR_DOWN,nbin=25,ctrl = 100,name = "BR_DOWN") 
+DimPlot(woo_cobi2,reduction="umap.harmony",group.by="seurat_annotation")+coord_fixed()
+FeaturePlot(woo_cobi2,reduction="umap.harmony",features="BR_UP1")
+FeaturePlot(woo_cobi2,reduction="umap.harmony",features="BR_DOWN1")
+
+
+##cancer
+sc_atras<-readRDS("~/Desktop/Sears lab/Experiment/single cell RNA seq/single cell atras/scAtlas.rds")
+sc_atras[["RNA"]]$data <- NULL
+sc_atras[["RNA"]]$scale.data <- NULL
+sc_atras[["RNA"]]<-as(sc_atras[["RNA"]],Class="Assay5")
+write_matrix_dir(mat = sc_atras[["RNA"]]$counts, dir = "~/Desktop/Sears lab/Experiment/single cell RNA seq/single cell atras/counts")
+counts.mat <- open_matrix_dir(dir = "~/Desktop/Sears lab/Experiment/single cell RNA seq/single cell atras/counts")
+sc_atras[["RNA"]]$counts <- counts.mat
+saveRDS(sc_atras,"~/Desktop/Sears lab/Experiment/single cell RNA seq/single cell atras/sc_atras_BPCells.rds")
+atras_cancer<-subset(sc_atras,subset=Clusters %in% c("DUCTAL","CYCLING DUCTAL") & nFeature_RNA>500 & nCount_RNA>750)
+Idents(atras_cancer)<-"Name"
+atras_cancer<-subset(atras_cancer,subset=GSE.SRA..Study.=="GSE202051",invert=T) #Remove snRNA-seq
+atras_cancer<-subset(atras_cancer,downsample=500)
+atras_cancer[["RNA"]]$counts<-as(atras_cancer[["RNA"]]$counts,"dgCMatrix")
+table(atras_cancer$Name)
+atras_cancer<-subset(atras_cancer,subset=Name%in%c("LiverMetB","SRR24437450"),invert=T)
+atras_cancer[["RNA"]]<-split(atras_cancer[["RNA"]],f=atras_cancer$Name)
+atras_cancer<-FindVariableFeatures(atras_cancer)
+atras_cancer<-NormalizeData(atras_cancer)
+atras_cancer<-ScaleData(atras_cancer)
+atras_cancer <- RunPCA(atras_cancer)
+atras_cancer<-IntegrateLayers(atras_cancer, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony", normalization.method="RNA")
+atras_cancer<- FindNeighbors(atras_cancer, reduction = "harmony", dims = 1:30)
+atras_cancer<- FindClusters(atras_cancer, resolution = 0.2, cluster.name = "harmony_clusters") #5clusters
+atras_cancer<- RunUMAP(atras_cancer, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(atras_cancer, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+DimPlot(atras_cancer, reduction="umap.harmony",group.by=c("DiseaseState"),label=T)
+DotPlot(atras_cancer,features=c("KRT19","EPCAM","CFTR","CLDN18","AQP1","MUC6","ONECUT2","AMY2A","ALB","MKI67","TOP2A","HBB"),group.by="harmony_clusters")+RotatedAxis()
+atras_cancer[["RNA"]]<-JoinLayers(atras_cancer[["RNA"]])
+saveRDS("~/Desktop/Sears lab/Experiment/single cell RNA seq/single cell atras/cancer+norm_sub500each.rds")
+atras_cancer<-subset(atras_cancer,subset=harmony_clusters %in% c("1","7") | DiseaseState %in% c("Adjacent normal","Donor"),invert=T)
+cancer<-subset(woo_cobi2,subset=seurat_annotation=="Cancer")
+cancer[["Name"]]<-cancer[["sample"]]
+cancer[["RNA"]]<-cancer[["decontXcounts"]]
+cancer<-subset(cancer,subset=sample=="Pt13_pre",invert=T)
+cancer_BG<-merge(cancer,atras_cancer)
+cancer_BG[["RNA"]]<-JoinLayers(cancer_BG[["RNA"]])
+
+cancer_BG<-subset(cancer_BG,subset=Name=="Pt11_pre",invert=T)
+cancer_BG[["RNA"]]<-split(cancer_BG[["RNA"]],f=cancer_BG$Name)
+DefaultAssay(cancer_BG)<-"RNA"
+cancer_BG<-FindVariableFeatures(cancer_BG)
+cancer_BG<-ScaleData(cancer_BG)
+cancer_BG <- RunPCA(cancer_BG)
+cancer_BG<-IntegrateLayers(cancer_BG, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony", normalization.method="RNA")
+cancer_BG<- FindNeighbors(cancer_BG, reduction = "harmony", dims = 1:30)
+cancer_BG<- FindClusters(cancer_BG, resolution = 0.1, cluster.name = "harmony_clusters") #5clusters
+cancer_BG<- RunUMAP(cancer_BG, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(cancer_BG, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+cancer_BG[["RNA"]]<-JoinLayers(cancer_BG[["RNA"]])
+Idents(cancer_BG)<-"harmony_clusters"
+cancer_BG
+cancer_BG <- AddModuleScore(object = cancer_BG,features = sc_Basal,nbin=25,ctrl = 100,name = "sc_Basal")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = sc_Classical,nbin=25,ctrl = 100,name = "sc_Classical")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = IC,nbin=25,ctrl = 100,name = "IC")
+cancer_BG[["sc_Basal"]]<-cancer_BG[["sc_Basal1"]]
+cancer_BG[["sc_Classical"]]<-cancer_BG[["sc_Classical1"]]
+cancer_BG[["Intermediate Co-expressor"]]<-cancer_BG[["IC1"]]
+
+
+#　figure 3B UMAP_pre_only_with background
+library(egg)
+Idents(cancer_BG)<-"response_pre_post"
+p<-DimPlot(cancer_BG,cols = c("grey","grey","grey","red","blue"),order=c("BR_pre","non-BR_pre","background","non-BR_post","BR_post"),pt.size = 0.05)+
+  coord_fixed()+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 6)
+  )
+p<-egg::set_panel_size(p,width= unit(4, "cm"), height= unit(3, "cm"))
+ggsave("Fig 3B.pdf", plot = p, width = 8, height = 5, units = "cm",dpi=300)
+
+
+
+#sample level visualization of basal classical data for pre comparison
+sample_means <- FetchData(cancer_BG, vars = c("Name", "sample","sc_Classical", "sc_Basal","IC1","pORG1","pSUB1","response_pre_post","DiseaseState")) %>%
+  group_by(Name) %>%
+  summarise(
+    mean_sc_Classical = mean(sc_Classical),
+    mean_sc_Basal = mean(sc_Basal),
+    mean_IC = mean(IC1),
+    mean_pORG = mean(pORG1),
+    mean_pSUB = mean(pSUB1),
+    group = slice_head(data.frame(response_pre_post), n = 1)$response_pre_post,
+    sample = slice_head(data.frame(sample), n = 1)$sample,
+    site= slice_head(data.frame(DiseaseState), n = 1)$DiseaseState)%>%
+  mutate(
+    group_label = case_when(
+      group %in% c("BR_pre", "non-BR_pre") ~ group,
+      site == "Primary tumor" ~ "background_primary",
+      site == "Metastatic lesion" ~ "background_metastasis",
+      TRUE ~ NA_character_
+    )
+  )
+color_map <- c(
+  "BR_pre" = "blue",
+  "non-BR_pre" = "red",
+  "background_primary" = "lightblue",
+  "background_metastasis" = "lightgray"
+)
+p<-ggplot(data = sample_means %>% filter(!is.na(group_label)),
+          aes(x = mean_sc_Classical, y = mean_sc_Basal, color = group_label)) +
+  theme_classic() +
+  labs(x = "sc_Classical", y = "sc_Basal", color = "Group") +
+  geom_point(
+    data = sample_means %>% filter(group_label %in% c("background_primary")),
+    size = 1, shape = 16
+  ) +
+  geom_point(
+    data = sample_means %>% filter(group_label %in% c( "background_metastasis")),
+    size = 1, shape = 16
+  ) +
+  geom_point(
+    data = sample_means %>% filter(group_label %in% c("BR_pre", "non-BR_pre")),
+    position = position_jitter(width = 0.03, height = 0.03),
+    size = 2, shape = 16
+  ) +
+  scale_color_manual(
+    values = color_map,
+    breaks = c( "BR_pre", "non-BR_pre","background_primary", "background_metastasis"),
+    name = ""  # 凡例のタイトル（必要に応じて変更可）
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 3)))+
+  coord_fixed(ratio = 1)+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 6)
+  )
+
+p<-egg::set_panel_size(p,width= unit(4, "cm"), height= unit(3, "cm"))
+ggsave("Fig 3F.pdf", plot = p, width = 10, height = 5, units = "cm",dpi=300)
+
+
+
+
+#subset_pre Sup Figure 3C
+sample_means_pre<-sample_means %>%
+  filter(group%in% c("BR_pre","non-BR_pre"))
+my_comparison_pre<-list(c("BR_pre","non-BR_pre"))
+
+p<-ggplot(sample_means_pre, aes(x = group, y = mean_sc_Basal, fill = group)) +
+  geom_point( color = "black", size = 1,position = position_jitter(width = 0.1)) + 
+  stat_compare_means(comparisons = my_comparison_pre, label = "p.format",method="t.test",size=2) +
+  coord_cartesian(ylim = c(min(sample_means_pre$mean_sc_Basal), max(sample_means_pre$mean_sc_Basal) * 1.2), clip = "off")+
+  theme_minimal() +
+  labs(x = NULL, y="sample mean of addmodule score",title = "sc Basal") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6),panel.grid = element_blank(),axis.line = element_line(color = "black"))+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10)
+  )
+p<-egg::set_panel_size(p,width= unit(2, "cm"), height= unit(2, "cm"))
+ggsave("Sup Fig 4C left.pdf", plot = p, width = 7, height = 6, units = "cm",dpi=300)
+
+p<- ggplot(sample_means_pre, aes(x = group, y = mean_sc_Classical, fill = group)) +
+  geom_point( color = "black", size = 2) + 
+  stat_compare_means(comparisons = my_comparison_pre, label = "p.format",method="t.test",size=2) +
+  coord_cartesian(ylim = c(min(sample_means_pre$mean_sc_Classical), max(sample_means_pre$mean_sc_Classical) * 1.2), clip = "off")+
+  theme_minimal() +
+  labs(x = NULL,y="sample mean of addmodule score", title = "sc Classical") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6),panel.grid = element_blank(),axis.line = element_line(color = "black"))+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10)
+  )
+p<-egg::set_panel_size(p,width= unit(2, "cm"), height= unit(2, "cm"))
+ggsave("Sup Fig 4C right.pdf", plot = p, width = 7, height = 6, units = "cm",dpi=300)
+
+
+#addmodulescore
+pORG<-list(c("TNFSF18","CST2","RPRD1B","BARD1","SORD2P","ZNF217","CHMP4B","SLFN13","MMEL1","SPATA24","OSER1","PHACTR3","PKIB","ARHGAP12","RBM41","MPZL3","GDE1","FGD6","PLAAT2","STAU1","ZG16B","RIOK3","ALOX5","CDS1","PIK3CB","HPGD","HIST1H1T","GID8","NUDT21","PAK1","CYP4F3","ARL17A","PLAAT3","SRP9","ANKRD18B","CCL20","CFB","SPOPL","CTNNBL1","NFE2L3","ACSL5","CIAO2A","SCOC","SAA4","PPP1R3C","WFDC13","FUNDC1","ADNP","DLEU7","NME7","EFNB2","LRRIQ1","MAP3K2","LNPK","ZDHHC13"))
+pSUB<-list(c("RHCGKRT17","GJB6","P2RY2","S100A3","C16orf74","NXPH4","HES2","PPP1R14B","DNER","FSCN1","TMPRSS11E","KRT6A","KRT7","GJB2","GSDMC","SEMA3F","KRT6C","BANF1","RHOV","PC","TNFRSF6B","PLXNA1","DENND2C","FHOD3","HAS3","PLAU","NRP2","KYNU","PORCN","SYT12","LVRN","TBC1D2","LPAR3","RAC3","SLC16A3","KYAT1","GPR153","SLCO1C1","PHKA1","PLEKHG5","NIBAN2","CNTNAP3","STRIP2","CALB2","USP31","EGFR","LRRC8A","FGFBP1","CSNK1E","COL7A1"))
+sc_Basal<-list(c("KRT6A","S100A2","KRT13","KRT17","LY6D","KRT7","KRT5","FAM83A","CD109","GAPDH","CSTA","PTPN13","MTSS1","SPRR1B","SLC2A1","CAV1","EMP1","SEMA3C","DHRS9","CAST","FLNA","SLITRK6","COL7A1","AQP3","MT2A","AHNAK2","KRT19","PKP1","YBX3","GJB5"))
+sc_Classical<-list(c("LGALS4","CTSE","TFF1","AGR2","TSPAN8","CEACAM6","LYZ","CDH17","TFF2","CLDN18","REG4","SPINK1","SLC44A4","GPX2","ANXA10","FAM3D","TFF3","MUC13","ANXA13","CEACAM5","VSIG2","PRSS3","ALDH2","IL1R2","AGR3","CYSTM1","CAPN5","S100A6","ONECUT2","BCAS1"))
+IC<-list(c("VCAM1","MALAT1","IGFBP3","SYNE2","TIMP2","TNFAIP2","NFAT5","SERPINA1","CXCL14","CX3CL1","ALPK3","ATHL1","DPYSL2","TMEM139","KLF6","KRT23","MEGF6","HOXB2","PADI1","MFSD4","INPP4B","BAIAP3","HMHA1","ECE1","CAMK2N1","SNORD89","WFDC2","TSHZ2","RILPL2","LAMB2"))
+basal_Moffitt <-list(c("VGLL1","UCA1","S100A2","LY6D","SPRR3","SPRR1B","LEMD1","KRT15","CTSL2","DHRS9","AREG","CST6","SERPINB3","KRT6C","KRT6A","SERPINB4","FAM83A","SCEL","FGFBP1","KRT7","KRT17","GPR87","TNS4","SLC2A1","ANXA8L2"))
+classical_Moffitt<-list(c("BTNL8","FAM3D","PRR15L","AGR3","CTSE","LOC400573","LYZ","TFF2","TFF1","ANXA10","LGALS4","PLA2G10","CEACAM6","VSIG2","TSPAN8","ST6GALNAC1","AGR2","TFF3","CYP3A7","MYO1A","CLRN3","KRT20","CDH17","SPINK4","REG4"))
+QM_Collisson<-list(c("AIM2","FAM26F","GPM6B","S100A2","KRT14","CAV1","LOX","SLC2A3","TWIST1","PAPPA","NT5E","CKS2","HMMR","SLC5A3","PMAIP1","PHLDA1","SLC16A1","FERMT1","HK2","AHNAK2"))
+classical_Collisson<-list(c("AGR2","ATP10B","CAPN8","CEACAM5","CEACAM6","ELF3","ERBB3","FOXQ1","FXYD3","GPRC5A","GPX2","LGALS4","MUC13","ST6GALNAC1","TFF1","TFF3","TMEM45B","TOX3","TSPAN8","SDR16C5","S100P","PLS1"))
+cancer_BG <- AddModuleScore(object = cancer_BG,features = pORG,nbin=25,ctrl = 100,name = "pORG")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = pSUB,nbin=25,ctrl = 100,name = "pSUB")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = sc_Basal,nbin=25,ctrl = 100,name = "sc_Basal")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = sc_Classical,nbin=25,ctrl = 100,name = "sc_Classical")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = IC,nbin=25,ctrl = 100,name = "IC")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = basal_Moffitt,nbin=25,ctrl = 100,name = "basal_Moffitt")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = classical_Moffitt,nbin=25,ctrl = 100,name = "classical_Moffitt")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = QM_Collisson,nbin=25,ctrl = 100,name = "QM_Collisson")
+cancer_BG <- AddModuleScore(object = cancer_BG,features = classical_Collisson,nbin=25,ctrl = 100,name = "classical_Collisson")
+
+
+# addmodulescore of hallmark
+library(data.table)
+library(msigdbr)
+inpGS <- data.table(msigdbr(species = "Homo sapiens", category = "H"))
+inpGS <- inpGS[grep("HALLMARK", gs_name)]
+inpGS$gs_name <- gsub("HALLMARK_", "", inpGS$gs_name)
+inpGS$gs_name <- gsub("_SIGNALING", "", inpGS$gs_name)
+inpGS <- split(inpGS$gene_symbol, inpGS$gs_name)
+cancer_BG <- AddModuleScore(cancer_BG, nbin=25,features = inpGS, name = "HALLMARK")
+colnames(cancer_BG@meta.data)[grep("HALLMARK", colnames(cancer_BG@meta.data))] <- names(inpGS)
+
+
+#Science KRAS signature
+PDAC_KRAS_ERK_UP<-list(c("AADAT","ACOX2","ADAT2","ADORA2B","AEN","AK2","AKAP12","AMD1","ANTXR2","AP1S2","AREG","ARHGAP11A","ASPH","ATAD5","AURKB","B3GLCT","BMAL2","BRCA1","BUB1","C3orf52","C4orf46","CACYBP","CALB2","CBFB","CBL","CCDC138","CCNA2","CCND1","CD83","CDC20","CDC25A","CDC45","CDCA5","CDCA7","CDCA8","CDK17","CDK6","CENPH","CENPK","CENPM","CENPQ","CENPU","CENPV","CEP128","CEP135","CEP78","CHAC2","CHEK1","CHUK","CIP2A","CKAP2L","CLPB","CLSPN","CMTM7","COPS3","COTL1","CTNNAL1","DBF4","DCBLD1","DCUN1D5","DDIAS","DDX11","DDX21","DEPDC1B","DGKD","DKC1","DKK1","DSCC1","DTL","E2F7","EBNA1BP2","ECT2","EDEM1","EFNB2","EIF5","ELK3","ELL2","EME1","EMP1","EPB41L2","EREG","ERRFI1","ETV1","ETV4","EXO1","EXOSC3","EZH2","FABP5","FAM3C","FAM72A","FAM72D","FARSB","FAS","FBXO45","FEN1","FGFBP3","FOSL1","FUT4","GAR1","GCLM","GINS1","GINS2","GINS3","GINS4","GPAT3","GPATCH11","GPD2","GPR75","GRPEL2","H2AX","H2AZ1","HAUS5","HJURP","HMGA1","HMGA2","ITGA2","ITPRID2","KBTBD8","KIF15","KIF22","KIF23","KIF2C","KNSTRN","LBR","LIF","LMNB1","LRWD1","LSM11","LYAR","LYPLA1","MAK16","MAP4K4","MBLAC2","MBNL1","MCM10","MCM6","MCM7","MCMBP","MCTP1","MELK","MND1","MNS1","MORC4","MPHOSPH6","MSN","MYBL1","MYC","MYO10","NAA15","NAV3","NCAPG","NCAPH","NCEH1","NCR3LG1","NIP7","NOC3L","NOG","NOM1","NOP16","NPAS2","NSMAF","NT5DC3","NT5E","NUF2","NUP35","NUP98","ODC1","OGFOD1","ORC6","OSBPL3","OSGEP","OTUD6B","PAK1IP1","PALS2","PAXIP1","PHC2","PINX1","PLK4","PMAIP1","PNO1","POLA2","POLE2","POLQ","PRELID1","PRIM2","PRR11","PRTFDC1","PSMC3IP","PSMD14","PTX3","QSER1","RAC2","RAD1","RAD18","RAD51","RAD51AP1","RAD54B","RAD54L","RAPH1","RASA2","RASSF8","RBBP8","REXO5","RFC3","RFC4","RFC5","RFWD3","RGS20","RHEBL1","RNF138","ROR1","RPIA","RPL22L1","RRM1","RRM2","RUNX1","S100A16","SASS6","SCML1","SENP1","SERPINB8","SFR1","SH3KBP1","SHCBP1","SKA1","SKP2","SLC25A10","SLC25A19","SLC35G1","SLC7A11","SLCO4A1","SMIM29","SMS","SNRPD1","SNX10","SPATA5","SPC24","SPDL1","SPRED1","SPRED2","SPRY4","STAMBPL1","STEAP1","STK17A","TAF1A","TCHP","TCN1","TEAD4","TEX30","TGFA","TIPIN","TMA16","TNFRSF10A","TNFRSF12A","TNS4","TOP1","TUBA1B","U2SURP","UBASH3B","UBE2C","UBE2N","UBE2T","UCHL5","UHRF1","UPP1","UTP4","VMA21","VRK1","WDHD1","WDR12","WDR76","XRCC2","XRCC4","ZGRF1","ZNF215","ZWILCH","ZWINT"))
+cancer_BG <- AddModuleScore(object = cancer_BG,features = PDAC_KRAS_ERK_UP,nbin=25,ctrl = 100,name = "PDAC_KRAS_ERK_UP")
+
+cancer_BG[["PDAC_KRAS_ERK_UP"]]<-cancer_BG[["PDAC_KRAS_ERK_UP1"]]
+
+#Cancer  
+cancer<-subset(cancer_BG,subset=response_pre_post %in% c("BR_pre","BR_post","non-BR_pre","non-BR_post"))
+cancer$response_pre_post<-factor(cancer$response_pre_post,levels=c("BR_pre","BR_post","non-BR_pre","non-BR_post"))
+cancer$ptID<-factor(cancer$ptID,levels=c("Pt6_pre","Pt6_post","Pt12_pre","Pt12_post","Pt7_pre","Pt7_post","Pt8_pre","Pt8_post","Pt9_pre","Pt9_post","Pt11_pre","Pt11_post","Pt14_pre","Pt14_post","Pt5_pre","Pt10_post"))
+cancer$response_pre_post<-fct_na_value_to_level(cancer$response_pre_post,"background")
+cancer$response_pre_post<-factor(cancer$response_pre_post,levels=c("BR_pre","BR_post","non-BR_pre","non-BR_post"))
+my_comparison_BR<-list(c("BR_pre","BR_post"),c("non-BR_pre","non-BR_post"))
+DimPlot(cancer, reduction="umap.harmony",group.by=c("response_pre_post"))+coord_fixed(ratio = 1)
+Idents(cancer)<-"harmony_clusters"
+prop.table(table(Idents(cancer),cancer$response_pre_post),margin=2)
+
+
+
+#cancer pair
+
+cancer_pair<-subset(cancer,subset=sample %in% c("Pt5_pre","Pt10_post"),invert=T)
+
+sample_means_pre_post_pair <- FetchData(cancer_pair, vars = c("Name","patient","sc_Classical", "sc_Basal","IC1","INTERFERON_ALPHA_RESPONSE","HLA-A","HLA-B","HLA-C","response_pre_post","pre_post")) %>%
+  group_by(Name) %>%
+  summarise(
+    mean_sc_Classical = mean(sc_Classical),
+    mean_sc_Basal = mean(sc_Basal),
+    mean_IC = mean(IC1),
+    mean_INTERFERON_ALPHA_RESPONSE = mean(INTERFERON_ALPHA_RESPONSE),
+    mean_HLA_A = mean(`HLA-A`),
+    mean_HLA_B = mean(`HLA-B`),
+    mean_HLA_C = mean(`HLA-B`),
+    prepost = slice_head(data.frame(pre_post), n = 1)$pre_post,
+    patient = slice_head(data.frame(patient), n = 1)$patient,
+    group = slice_head(data.frame(response_pre_post), n = 1)$response_pre_post)
+
+#Fig 4A
+p<-DimPlot(cancer_pair, reduction="umap.harmony",split.by="response_pre_post",ncol=2)+coord_fixed(ratio = 1)+
+  labs(x = "umap 1", y="umap 2") +
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 6),
+    strip.text = element_text(size = 6)   
+  )
+p<-egg::set_panel_size(p,width= unit(2, "cm"), height= unit(2, "cm"))
+ggsave("Fig 4A.pdf", plot = p, width = 7, height = 7, units = "cm",dpi=300)
+
+##Figure4D IC FeaturePlot   
+p<-FeaturePlot_scCustom(cancer_pair, reduction="umap.harmony",features=c("IC1"),na_cutoff=NULL)+coord_fixed(ratio = 1)+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 6),
+    strip.text = element_text(size = 10)   
+  )
+p<-egg::set_panel_size(p,width= unit(2.5, "cm"), height= unit(2.5, "cm"))
+ggsave("Fig 4Dleft.pdf", plot = p, width = 7, height = 7, units = "cm",dpi=300)
+
+
+#Figure 4D BR-nonBR IC VlnPlot
+cancer_pair[["IC"]]<-cancer_pair[["IC1"]]
+
+#Sample level addmodulescore comparison (comes up IC, estrogen, apical junction,androgen)
+module_score_cols <- c(names(inpGS),  "PDAC_KRAS_ERK_UP", "sc_Basal","sc_Classical","IC")
+sample_scores_long <- cancer_pair@meta.data %>%
+  dplyr::select(patient, pre_post, response, all_of(module_score_cols)) %>%
+  pivot_longer(cols = all_of(module_score_cols), names_to = "module", values_to = "score") %>%
+  group_by(patient, pre_post,  response, module) %>%
+  summarise(mean_score = mean(score, na.rm = TRUE), .groups = "drop")
+
+sample_scores_wide <- sample_scores_long %>%
+  pivot_wider(names_from = pre_post, values_from = mean_score) %>%
+  mutate(delta = post - pre)
+
+ttest_results <- sample_scores_wide %>%
+  group_by(module) %>%
+  summarise(
+    p_value = t.test(delta ~ response)$p.value,
+    .groups = "drop"
+  )
+
+p<- VlnPlot(cancer_pair,group.by=c("response_pre_post"),features="IC1",y.max=1,pt.size=0)+
+  geom_point(data=sample_means_pre_post_pair, aes(x = group, y = mean_IC,fill=group), color = "black", size = 1) + 
+  geom_line(data = sample_means_pre_post_pair,aes(x = group, y = mean_IC,fill=group, group = patient),color = "gray50", linewidth = 0.5)+
+  theme_minimal() +
+  labs(title="IC",x = NULL, y = "AddmoduleScore") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6),panel.grid = element_blank(),axis.line = element_line(color = "black"),legend.position = "none")+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 6),
+    strip.text = element_text(size = 10)   
+  )
+p<-egg::set_panel_size(p,width= unit(2.5, "cm"), height= unit(2.5, "cm"))
+ggsave("Fig 4Dright.pdf", plot = p, width = 7, height = 7, units = "cm",dpi=300)
+
+
+## Supo Fig 5C VlnPlot HLA  
+p<-VlnPlot(cancer_pair,group.by=c("pre_post"),features="HLA-A",pt.size=0)+
+  geom_point(data=sample_means_pre_post_pair, aes(x = prepost, y = mean_HLA_A,fill=prepost), color = "black", size = 1) + 
+  geom_line(data = sample_means_pre_post_pair,aes(x = prepost, y = mean_HLA_A,fill=prepost, group = patient),color = "gray50", linewidth = 0.5)+
+  theme_minimal() +
+  labs(title="HLA-A",x = NULL, y = "Log-normalized coount") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6),panel.grid = element_blank(),axis.line = element_line(color = "black"),legend.position = "none" )+ 
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10)  
+  )
+p<-egg::set_panel_size(p,width= unit(1.5, "cm"), height= unit(2, "cm"))
+ggsave("Sup fig 5C_HLAA.pdf", plot = p, width = 7, height = 7, units = "cm",dpi=300)
+
+p<-VlnPlot(cancer_pair,group.by=c("pre_post"),features="HLA-B",pt.size=0)+
+  geom_point(data=sample_means_pre_post_pair, aes(x = prepost, y = mean_HLA_B,fill=prepost), color = "black", size = 1) + 
+  geom_line(data = sample_means_pre_post_pair,aes(x = prepost, y = mean_HLA_B,fill=prepost, group = patient),color = "gray50", linewidth = 0.5)+
+  theme_minimal() +
+  labs(title="HLA-B",x = NULL, y = "Log-normalized coount") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6),panel.grid = element_blank(),axis.line = element_line(color = "black"),legend.position = "none" )+ 
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10)  
+  )
+p<-egg::set_panel_size(p,width= unit(1.5, "cm"), height= unit(2, "cm"))
+ggsave("Sup fig 5C_HLAB.pdf", plot = p, width = 7, height = 7, units = "cm",dpi=300)
+
+p<-VlnPlot(cancer_pair,group.by=c("pre_post"),features="HLA-C",pt.size=0)+
+  geom_point(data=sample_means_pre_post_pair, aes(x = prepost, y = mean_HLA_C,fill=prepost), color = "black", size = 1) + 
+  geom_line(data = sample_means_pre_post_pair,aes(x = prepost, y = mean_HLA_C,fill=prepost, group = patient),color = "gray50", linewidth = 0.5)+
+  theme_minimal() +
+  labs(title="HLA-C",x = NULL, y = "Log-normalized coount") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size=6),panel.grid = element_blank(),axis.line = element_line(color = "black"),legend.position = "none" )+ 
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10)  
+  )
+p<-egg::set_panel_size(p,width= unit(1.5, "cm"), height= unit(2, "cm"))
+ggsave("Sup fig 5C_HLAC.pdf", plot = p, width = 7, height = 7, units = "cm",dpi=300)
+
+
+
+#cancer_pre Figure3C left
+cancer_pre<-subset(cancer,subset=sample %in% c("Pt6_post","Pt12_post","Pt7_post","Pt8_post","Pt9_post","Pt11_post","Pt10_post","Pt14_post"),invert=T)
+DimPlot(cancer_pre,reduction="umap.harmony",group.by="response_pre_post")
+p<-DimPlot(cancer_pre,reduction="umap.harmony",group.by="harmony_clusters",pt.size=0.05)+coord_fixed()+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 6)
+  )
+p<-egg::set_panel_size(p,width= unit(3, "cm"), height= unit(2, "cm"))
+ggsave("Fig 3C left.pdf", plot = p, width = 8, height = 5, units = "cm",dpi=300)
+
+#Difference of each cluster
+prop.table(table(cancer_pre$harmony_clusters,cancer_pre$response),margin=2)
+
+#cluster increased in BR cl:0,3,5 vs increased in non-BRcl:1,2,4,6,7,8
+cancer_pre$BR_cluster<-NA
+cancer_pre$BR_cluster[cancer_pre$harmony_clusters %in% c("0","3","5")]<-"BR_clusters"
+cancer_pre$BR_cluster[cancer_pre$harmony_clusters %in% c("1","2","4","6","7","8")]<-"non-BR_clusters"
+cancer_pre[["PDAC_KRAS_ERK_UP"]]<-cancer_pre[["PDAC_KRAS_ERK_UP1"]]
+cancer_pre[["IC"]]<-cancer_pre[["IC1"]]
+cancer_pre[["Moffitt_Classical"]]<-cancer_pre[["classical_Moffitt1"]]
+cancer_pre[["Moffitt_Basal"]]<-cancer_pre[["basal_Moffitt1"]]
+Idents(cancer_pre)<-"response"
+
+# Imput for Figure 3C GSEA
+Idents(cancer_pre)<-"BR_response"
+q<-FindMarkers(cancer_pre,ident.1=c("0","3","5"),ident.2=c("1","4"),test.use="MAST")
+q$rnk<-log10(q$p_val)*q$avg_log2FC
+write.csv(q,"~/Desktop/Sears lab/Experiment/single cell RNA seq/Pt5_36/woo_pre_BR_nonBR_cluster_MAST_DEG.csv")
+
+
+
+#sample level addmodulescore comparison accounting cell level veriability
+module_score_cols <- c("sc_Basal","sc_Classical","IC")
+sample_scores_long <- cancer_pre@meta.data %>%
+  dplyr::select(sample, response, all_of(module_score_cols)) %>%
+  pivot_longer(cols = all_of(module_score_cols), names_to = "module", values_to = "score") %>%
+  group_by(sample, response, module) %>%
+  summarise(mean_score = mean(score, na.rm = TRUE), .groups = "drop")
+
+ttest_results <- sample_scores_long %>%
+  group_by(module) %>%
+  summarise(p_value = t.test(mean_score ~ response)$p.value,
+            .groups = "drop") %>%
+  mutate(p_adj = p.adjust(p_value, method = "fdr"))
+
+
+
+
+
+
+###stroma　(Supplimentary Figure4A)
+stroma<-subset(woo_cobi2,subset=seurat_annotation %in% c("Cancer"),invert=T)
+
+stroma[["decontXcounts"]]<-split(stroma[["decontXcounts"]],f=stroma$sample)
+stroma<-FindVariableFeatures(stroma)
+stroma<-ScaleData(stroma)
+stroma<-RunPCA(stroma)
+stroma<-IntegrateLayers(stroma, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+stroma<- FindNeighbors(stroma, reduction = "harmony", dims = 1:30)
+stroma<- FindClusters(stroma, resolution = 1, cluster.name = "harmony_clusters")
+stroma<- RunUMAP(stroma, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+stroma<-JoinLayers(stroma)
+stroma$seurat_annotation[stroma$seurat_annotation=="T"]<-"T/NK"
+#(Supplimentary Figure6A)
+p<-DimPlot(stroma, reduction="umap.harmony",group.by=c("seurat_annotation"),label=T,repel=T,label.size = 2)+
+  coord_fixed()+
+  theme(
+    axis.text = element_text(size = 6),  
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),  
+    legend.title = element_text(size = 6), 
+    plot.title = element_text(size = 10),
+    strip.text = element_text(size = 6) 
+  )
+p<-egg::set_panel_size(p,width= unit(4, "cm"), height= unit(3, "cm"))
+ggsave("Sup Fig 6A.pdf", plot = p, width = 8, height = 5, units = "cm",dpi=300)
+
+#stroma_liver (Supplimentary Figure 6B)
+stroma_l<-subset(stroma,subset=sample %in% c("Pt7_pre","Pt7_post"),invert=T)
+stroma_l[["decontXcounts"]]<-split(stroma_l[["decontXcounts"]],f=stroma_l$sample)
+stroma_l<-FindVariableFeatures(stroma_l)
+stroma_l<-ScaleData(stroma_l)
+stroma_l<-RunPCA(stroma_l)
+stroma_l<-IntegrateLayers(stroma_l, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+stroma_l<- FindNeighbors(stroma_l, reduction = "harmony", dims = 1:30)
+stroma_l<- FindClusters(stroma_l, resolution = 1, cluster.name = "harmony_clusters")
+stroma_l<- RunUMAP(stroma_l, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+stroma_l<-JoinLayers(stroma_l)
+p<-DimPlot(stroma_l, reduction="umap.harmony",group.by=c("seurat_annotation"),label=T,repel=T,label.size = 2)+coord_fixed()+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10),
+    strip.text = element_text(size = 6) 
+  )
+p<-egg::set_panel_size(p,width= unit(4, "cm"), height= unit(3, "cm"))
+ggsave("Sup Fig 6B.pdf", plot = p, width = 8, height = 5, units = "cm",dpi=300)
+
+
+
+
+## T/NK population
+tnk<-subset(woo_cobi2,subset=seurat_annotation%in% c("T/NK"))
+table(tnk$sample)
+tnk[["decontXcounts"]]<-split(tnk[["decontXcounts"]],f=tnk$sample)
+tnk<-FindVariableFeatures(tnk)
+tnk<-ScaleData(tnk)
+tnk <- RunPCA(tnk)
+tnk<-IntegrateLayers(tnk, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+tnk<- FindNeighbors(tnk, reduction = "harmony", dims = 1:30)
+tnk<- FindClusters(tnk, resolution = 1, cluster.name = "harmony_clusters") #5clusters
+tnk<- RunUMAP(tnk, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(tnk, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+DotPlot(tnk,features=c("KRT19","EPCAM","ALB","VIM","COL1A1","DCN","ACTA2","PECAM1","CD34","CD3E","CD4","CD8A","IL7R","KLRD1","CD79A","MS4A1","IGHA1","FCER1G","CD68","HLA-DRA","CD74","ITGAX","CLU","MS4A2","GZMB","MKI67","TOP2A","HBB"),group.by="harmony_clusters")+RotatedAxis()
+DotPlot(tnk,features = c("CD3D","CD4","CD40LG","CD8A","CD8B","SLC4A10","CCR7","IL7R","SELL","LEF1","TIMP1","USP10","TNFRSF4","IL2RA","FOXP3","CCR10","LINC00152","MIR4435-1HG","IRF7","MX1","IFI6","OAS1","CXCR3","CTSW","CCL5","NKG7","GZMA","GZMK","GNLY","GZMY","GZMB","GZMH","CXCL13","FGFBP2","KLRB1","NCR3","ZBTB16","TBX21","GATA3","CTLA4","PDCD1","TIGIT","LAG3","ITGA1","ITGAE","CD69","MKI67","TRDV1","TRDV2","TRDV3","TRDC"),group.by = "harmony_clusters")+RotatedAxis()
+tnk<-JoinLayers(tnk)
+
+
+
+#gdT module score(Journal of Leukocyte Biology, Volume 114, Issue 6, December 2023)
+gd_score<-list(c("TRDV1","TRDV2","TRDV3","TRDC"))
+tnk<-AddModuleScore(tnk,gd_score,name="gd_score")
+FeaturePlot(tnk,reduction="umap.harmony",features="gd_score1")
+
+
+#break CD4/CD8 in naive, proliferative, population
+#Naive
+naive<-subset(tnk,subset=harmony_clusters %in% c("15"))
+table(naive$sample)
+naive<- FindNeighbors(naive, reduction = "harmony", dims = 1:30)
+naive<- FindClusters(naive, resolution = 1, cluster.name = "harmony_clusters") #5clusters
+naive<- RunUMAP(naive, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(naive,reduction="umap.harmony")
+FeaturePlot(naive,reduction="umap.harmony",features="CD8A")
+FeaturePlot(naive,reduction="umap.harmony",features="CD4")
+VlnPlot(naive,features="CD8A")
+VlnPlot(naive,features="CD4")
+naive$seurat_annotation[naive$harmony_clusters%in%c("2","3","4","5","6")]<-"CD8 Naive"
+naive$seurat_annotation[naive$harmony_clusters%in%c("1","0")]<-"CD4 Naive"
+DimPlot(naive,reduction="umap.harmony",group.by="seurat_annotation")
+
+#Prolif
+Pro<-subset(tnk,subset=harmony_clusters %in% c("13"))
+table(Pro$sample)
+Pro[["decontXcounts"]]<-split(Pro[["decontXcounts"]],f=Pro$sample)
+Pro<-FindVariableFeatures(Pro)
+Pro<-ScaleData(Pro)
+Pro <- RunPCA(Pro)
+Pro<-IntegrateLayers(Pro, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+Pro<- FindNeighbors(Pro, reduction = "harmony", dims = 1:30)
+Pro<- FindClusters(Pro, resolution = 0.4, cluster.name = "harmony_clusters") #5clusters
+Pro<- RunUMAP(Pro, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(Pro,reduction="umap.harmony")
+FeaturePlot(Pro,reduction="umap.harmony",features="CD8A")
+FeaturePlot(Pro,reduction="umap.harmony",features="CD4")
+FeaturePlot(Pro,reduction="umap.harmony",features="")
+VlnPlot(Pro,features="CD8A")
+VlnPlot(Pro,features="CD4")
+Pro$seurat_annotation[Pro$harmony_clusters%in%c("4")]<-"CD8 Pro"
+Pro$seurat_annotation[Pro$harmony_clusters%in%c("2")]<-"CD4 Pro"
+DimPlot(Pro,reduction="umap.harmony",group.by="seurat_annotation")
+
+
+
+tnk$seurat_annotation<-naive$seurat_annotation
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("4")]<-"MAIT"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("13")]<-"Proliferative T"
+tnk$seurat_annotation<-Pro$seurat_annotation
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("10","18","17")]<-"NK"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("12")]<-"NKT"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("1","21","20")]<-"CD4 Teff"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("11")]<-"CD4 Tfh"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("9","14","8","2")]<-"CD8 Tem/cm"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("3")]<-"gdT"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("5","16","6","19")]<-"Treg"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("0")]<-"CD8 Tex"
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("7")]<-"CD8 Tpex"  
+tnk$seurat_annotation[tnk$harmony_clusters%in%c("16","22")]<-"Doublet"
+DimPlot(tnk,reduction="umap.harmony",group.by="seurat_annotation")
+
+tnk$seurat_annotation1<-tnk$seurat_annotation
+tnk$seurat_annotation1[tnk$seurat_annotation%in%c("CD4 Naive","CD4 Teff","CD4 Tfh","CD4 Pro")]<-"CD4 T"
+tnk$seurat_annotation1[tnk$seurat_annotation%in%c("CD8 Tpex","CD8 Tex","CD8 Tem/cm","CD8 Naive","gdT","CD8 Pro")]<-"CD8 T"
+DimPlot(tnk,reduction="umap.harmony",group.by="seurat_annotation1")
+
+woo_cobi2$seurat_annotation1<- woo_cobi2$seurat_annotation
+woo_cobi2$seurat_annotation1<-tnk$seurat_annotation1
+
+
+
+#Macro/Mono/cDC
+mmd<-subset(woo_cobi2, subset=seurat_annotation%in% c("Mono/Macro/cDC"))
+table(mmd$sample)
+mmd[["decontXcounts"]]<-split(mmd[["decontXcounts"]],f=mmd$sample)
+mmd<-FindVariableFeatures(mmd)
+mmd<-ScaleData(mmd)
+mmd <- RunPCA(mmd)
+mmd<-IntegrateLayers(mmd, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+mmd<- FindNeighbors(mmd, reduction = "harmony", dims = 1:30)
+mmd<- FindClusters(mmd, resolution = 0.6  , cluster.name = "harmony_clusters" )
+mmd<- RunUMAP(mmd, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(mmd, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T,repel=T)
+DotPlot(mmd,features=c("KRT19","EPCAM","ALB","VIM","COL1A1","DCN","ACTA2","PECAM1","CD34","CD3E","CD4","CD8A","IL7R","KLRD1","CD79A","MS4A1","IGHA1","FCER1G","CD68","HLA-DRA","CD74","ITGAX","CLU","MS4A2","GZMB","MKI67","TOP2A","HBB"),group.by="harmony_clusters")+RotatedAxis()
+DotPlot(mmd,features=c("CD68","THBS1","EREG","S100A9","FCN1","AREG","VCAN","HLA-DPB1","HLA-DQA1","FCER1A","CD1C","CST7","CCL4","CCL4L2","CCL3","CCL3L1","EGR1","IL6","RNASE1","F13A1","CD74","MS4A6A","CSTB","SPP1","NUPR1","CTSL","IL1RN","CCL20","TIMP1","FN1","CCL18","MARCO","RETN","GCHFR","FBP1","MCEMP1","FABP5","APOE","APOC1","ACP5","GPNMB","C15orf48","SLPI","TNFAIP3","IFITM2","S100A8","NAMPT","CXCL8","SRGN","CXCR4","IL1B"),group.by="harmony_clusters")+RotatedAxis()
+mmd<-JoinLayers(mmd)
+
+Idents(mmd)<-"harmony_clusters"
+mmd.markers <- FindAllMarkers(mmd, only.pos = TRUE)
+mmd.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 0.25) %>%
+  slice_head(n = 20) %>%
+  ungroup() -> top20
+DoHeatmap(mmd, features = top20$gene) + NoLegend()+ theme(text = element_text(size = 7))
+
+
+# addmodule score(MNP paper)
+Macro<-list(c("APOE","APOC1","C1QB","C1QC","RNASE1","ACP5","GPNMB","PLD3","CTSB","PLTP","CD9","PRDX1","CTSZ","DAB2","CD63","CD81","LIPA","GLUL","SLCO2B1","CREG1","LGALS3","LAMP1"))
+cMo<-list(c("S100A8","S100A9","S100A12","VCAN","CSF3R"))
+CD16Mo<-list(c("CDKN1C","LRRC25","TCF7L2","LYN","PILRA"))
+cDC1<-list(c("CPNE3","WDFY4","CADM1","CDK2AP2","SNX3"))
+DC2_3<-list(c("FCER1A","CD1C","CLEC10A"))
+mregDC<-list(c("CCR7","CCL22","LAMP3","EBI3","RAB8B","CERS6"))
+mmd <- AddModuleScore(object = mmd,features = Macro,nbin=25,ctrl = 100,name = "Macro")
+mmd <- AddModuleScore(object = mmd,features = cMo,nbin=25,ctrl = 100,name = "cMo")
+mmd <- AddModuleScore(object = mmd,features = CD16Mo,nbin=25,ctrl = 100,name = "CD16Mo")
+mmd <- AddModuleScore(object = mmd,features = cDC1,nbin=25,ctrl = 100,name = "cDC1")
+mmd <- AddModuleScore(object = mmd,features = DC2_3,nbin=25,ctrl = 100,name = "DC2_3")
+mmd <- AddModuleScore(object = mmd,features = mregDC,nbin=25,ctrl = 100,name = "mregDC")
+FeaturePlot(mmd,reduction="umap.harmony",features="Macro1")
+FeaturePlot(mmd,reduction="umap.harmony",features="cMo1")
+FeaturePlot(mmd,reduction="umap.harmony",features="CD16Mo1")
+FeaturePlot(mmd,reduction="umap.harmony",features="cDC11")
+FeaturePlot(mmd,reduction="umap.harmony",features="DC2_31")
+FeaturePlot(mmd,reduction="umap.harmony",features="mregDC1")
+FeaturePlot(mmd,reduction="umap.harmony",features="IL1B")
+#annotation
+mmd$seurat_annotation[mmd$harmony_clusters %in% c("1","6","12","5","0")]<-"Macro"
+mmd$seurat_annotation[mmd$harmony_clusters %in% c("4")]<-"IL1B Mono"
+mmd$seurat_annotation[mmd$harmony_clusters %in% c("2","7")]<-"Mono"
+mmd$seurat_annotation[mmd$harmony_clusters %in% c("8")]<-"CD16Mono"
+mmd$seurat_annotation[mmd$harmony_clusters%in%c("9","10")]<-"cDC1" 
+mmd$seurat_annotation[mmd$harmony_clusters%in% c("3")]<-"DC2/3"
+mmd$seurat_annotation[mmd$harmony_clusters%in% c("13")]<-"mregDC"
+mmd$seurat_annotation[mmd$harmony_clusters%in% c("11")]<-"Proliferative Myeloid"
+DimPlot(mmd,reduction="umap.harmony",group.by="seurat_annotation")+coord_fixed(ratio = 1)
+mmd$sample<-factor(mmd$sample,levels=c("Pt6_pre","Pt6_post","Pt12_pre","Pt12_post","Pt7_pre","Pt7_post","Pt8_pre","Pt8_post","Pt9_pre","Pt9_post","Pt11_pre","Pt11_post","Pt13_pre","Pt13_post","Pt5_pre","Pt10_post"))
+my_comparisonm<-list(c("Pt6_pre","Pt6_post"),c("Pt12_pre","Pt12_post"),c("Pt7_pre","Pt7_post"),c("Pt8_pre","Pt8_post"),c("Pt9_pre","Pt9_post"),c("Pt11_pre","Pt11_post"),c("Pt13_pre","Pt13_post"))
+
+
+woo_cobi2$seurat_annotation1<-mmd$seurat_annotation
+woo_cobi2$seurat_annotation1[woo_cobi2$seurat_annotation1 %in%c("cDC1","DC2/3","mregDC")]<-"cDC"
+woo_cobi2$seurat_annotation1[woo_cobi2$seurat_annotation1 %in%c("Mono","CD16Mono","IL1B Mono","Macro")]<-"Macro/Mono"
+DimPlot(woo_cobi2,group.by = "seurat_annotation1")
+
+
+#immune (Figure4A)
+immune<-subset(woo_cobi2,subset=seurat_annotation1 %in% c("Cancer","Fibroblast","Endothelial","Hepatocyte","Cholangiocyte"),invert=T)
+immune<-subset(immune,subset=seurat_annotation1=="Doublet",invert=T)
+immune$seurat_annotation[immune$seurat_annotation1=="T"]<-"T/NK"
+immune[["decontXcounts"]]<-split(immune[["decontXcounts"]],f=immune$sample)
+immune<-FindVariableFeatures(immune)
+immune<-ScaleData(immune)
+immune<-RunPCA(immune)
+immune<-IntegrateLayers(immune, method=HarmonyIntegration, orig.reduction = "pca",new.reduction = "harmony")
+immune<- FindNeighbors(immune, reduction = "harmony", dims = 1:30)
+immune<- FindClusters(immune, resolution = 1, cluster.name = "harmony_clusters")
+immune<- RunUMAP(immune, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(immune, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T,repel=T)+coord_fixed()
+DotPlot(immune,features=c("CD3E","CD4","CD8A","IL7R","KLRD1","CD79A","MS4A1","IGHA1","FCER1G","CD68","HLA-DRA","CD74","ITGAX","CLU","MS4A2","GZMB","MKI67","TOP2A"),group.by="seurat_annotation1")+RotatedAxis()
+immune<-JoinLayers(immune)
+p<-DimPlot(immune, reduction="umap.harmony",group.by=c("seurat_annotation1"),label=T,repel=T, label.size = 2)+coord_fixed()+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10),
+    strip.text = element_text(size = 6) 
+  )
+p<-egg::set_panel_size(p,width= unit(3, "cm"), height= unit(3, "cm"))
+ggsave("Fig 5A.pdf", plot = p, width = 8, height = 10, units = "cm",dpi=300)
+
+#Sup Fig 6D 
+Idents(immune)<-"seurat_annotation1"
+immune.markers <- FindAllMarkers(immune, asssay="decontXcounts",group.by="seurat_annotation1",only.pos = TRUE)
+immune.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1) %>%
+  slice_head(n = 3) %>%
+  ungroup() -> top3
+top3<-top3[!duplicated(top3$gene),]
+Clustered_DotPlot(immune,features=top3$gene,group.by="seurat_annotation1",flip=T,show_ident_legend=F,show_ident_colors=F,
+                  row_label_size = 12,
+                  column_label_size = 12,
+                  legend_label_size = 12,
+                  legend_title_size = 12,)
+
+
+p<-dittoBarPlot(
+  object = immune,
+  x.reorder=c(12,11,5,4,14,13,16,15,18,17,3,2,7,6,9,8,10,1),
+  var.labels.reorder = c(1,2,3,8,15,11,10,4,12,7,9,14,6,13,5),
+  var = "seurat_annotation1",
+  group.by = "ptID")+
+  theme(
+    axis.text = element_text(size = 6),     # 軸の数値
+    axis.title = element_text(size = 6),    # 軸ラベル
+    legend.text = element_text(size = 6),   # 凡例ラベル
+    legend.title = element_text(size = 6),  # 凡例タイトル
+    plot.title = element_text(size = 10),
+    strip.text = element_text(size = 6) 
+  )
+p<-egg::set_panel_size(p,width= unit(5, "cm"), height= unit(3, "cm"))
+ggsave("Sup Fig 6C.pdf", plot = p, width = 10, height = 10, units = "cm",dpi=300)
+
+
+# For Figure 5B
+prop.table(table(immune$seurat_annotation1,immune$sample),margin=2)
+p<-as.data.frame(p)
+colnames(p) <- c("seurat_annotation1", "sample", "proportion")
+write_csv(as.data.frame(p),"~/Desktop/Sears lab/Experiment/single cell RNA seq/Pt5_36/immune_percentage.csv")
+
