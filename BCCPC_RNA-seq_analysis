@@ -1,0 +1,1046 @@
+# Set up Seurat object
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+library(tidyverse)
+library(batchelor)
+library(qusage)
+library(org.Hs.eg.db)
+library(magrittr)
+library(readr)
+library(GSVA)
+library(ComplexHeatmap)
+library(ggrepel)
+library(biomaRt)
+library(sva)
+library(ggsignif)
+library(readxl)
+library(multcomp)
+
+data<-read.delim("batch_corrected_TPM.txt")
+# filter
+keep <- rowSums(data>=1)>=100
+data_cleaned <- data[keep,]
+#GSVA
+hallmark_gene_sets <- msigdbr::msigdbr(
+  species = "Homo sapiens", # Can change this to what species you need
+  category = "H"
+)
+
+hallmarks_list <- split(
+  hallmark_gene_sets$gene_symbol, # The genes we want split into pathways
+  hallmark_gene_sets$gs_name # The pathways made as the higher levels of the list
+)
+
+KRAS_PDAC_signatures = read.table("~/Desktop/Sears_lab/Experiment/RNAseq/KRAS_PDAC_signatures_science_2024.tsv", 
+                                  sep="\t", quote="", comment.char = "", header=TRUE, row.names=1, stringsAsFactors=FALSE)
+library(mGSZ)
+
+BRsignature<-readRDS("BRsignature.rds")
+list<-c(hallmarks_list,KRAS_PDAC_signatures,BRsignature)
+gsva_par<-gsvaParam(as.matrix(data_cleaned),list,kcdf="Gaussian")#,kcdf="Poisson"<-when use normalized count, they recommend to use VST
+gsva_results<-gsva(gsva_par)
+
+gsva_results1<-as.data.frame(t(gsva_results))
+gsva_results1$met_site<-c("Other","Liver","Primary","Primary","Liver","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Liver","Primary","Liver","Other","Primary","Liver","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Lung","Primary","Primary","Liver","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Liver","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Liver","Liver","Primary","Primary","Primary","Primary","Primary","Primary","Liver","Primary","Lung","Liver","Primary","Primary","Lung","Primary","Primary","Primary","Primary","Lung","Primary","Primary","Lung","Other","Primary","Primary","Primary","Primary","Liver","Primary","Liver","Primary","Primary","Primary","Primary","Lung","Primary","Primary","Other","Liver","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Other","Primary","Liver","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Liver","Primary","Primary","Primary","Primary","Other","Liver","Liver","Liver","Primary","Primary","Primary","Primary","Liver","Other","Primary","Primary","Other","Primary","Other","Liver","Primary","Other","Primary","Primary","Other","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Liver","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Other","Lung","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Primary","Liver","Primary","Liver","Primary","Primary","Primary","Liver","Other","Primary","Primary","Primary","Primary","Liver","Liver","Liver","Primary","Primary","Primary","Primary","Other","Liver","Primary","Primary","Primary","Primary","Primary","Other","Primary","Primary","Primary","Primary","Primary","Liver","Liver","Primary","Primary","Primary","Primary","Liver","Primary","Liver","Primary","Primary","Liver","Primary","Primary","Primary","Primary","Primary","Other","Liver","Primary","Primary","Liver","Primary","Primary","Primary","Other","Primary","Primary","Primary","Primary","Lung","Primary","Liver","Liver","Liver","Primary","Liver","Primary","Other","Primary","Primary","Primary","Primary","Primary","Primary","Liver","Primary","Primary","Lung","Primary","Liver","Other","Primary","Primary","Primary","Primary","Other","Primary","Primary","Other","Primary","Liver","Other","Primary","Liver","Primary","Primary","Primary","Primary","Liver","Primary","Other","Primary","Primary","Primary","Other")
+
+
+gsva_results1$met_site<-as.character(gsva_results1$met_site)
+gsva_results1$met_site_with_No[gsva_results1$met_site %in% c("Liver")] <- "Liver (n=45)"
+gsva_results1$met_site_with_No[gsva_results1$met_site %in% c("Primary")] <- "Primary (n=222)"
+gsva_results1$met_site_with_No[gsva_results1$met_site %in% c("Lung")] <- "Lung (n=9)"
+gsva_results1$met_site_with_No[gsva_results1$met_site == "Other"] <- "Other (n=36)"
+
+
+
+colnames(gsva_results1) <- gsub("HALLMARK_", "", colnames(gsva_results1))
+pathways <- gsva_results1 %>% dplyr::select(where(is.numeric)) %>% colnames()
+pathways<-pathways[-c(28,29,51,52,54:83)]
+gsva_results1$met_site_with_No <- factor(gsva_results1$met_site_with_No,levels=c("Primary (n=222)","Other (n=36)","Lung (n=9)","Liver (n=45)"))
+
+## Figure 1E
+{dunnett_results <- list()
+for (pw in pathways) {
+  formula <- as.formula(paste(pw, "~ met_site_with_No"))
+  model <- aov(formula, data = gsva_results1)
+  dunnett_test <- glht(model, linfct = mcp(met_site = "Dunnett"))
+  dunnett_results[[pw]] <- summary(dunnett_test)
+}
+dunnett_results[[1]]
+met_site_levels <- levels(gsva_results1$met_site_with_No)
+asterisk_mat <- matrix("", nrow = length(met_site_levels), ncol = length(pathways), 
+                       dimnames = list(met_site_levels, pathways))
+for (pw in pathways) {
+  result <- dunnett_results[[pw]]
+  pval <- result$test$pvalues  
+  for (i in 2:length(met_site_levels)) {
+    if (pval[i-1] < 0.001) {
+      asterisk_mat[i, pw] <- "***"
+    } else if (pval[i-1] < 0.01) {
+      asterisk_mat[i, pw] <- "**"
+    } else if (pval[i-1] < 0.05) {
+      asterisk_mat[i, pw] <- "*"
+    }
+  }
+}
+
+avg_scores <- gsva_results1 %>%
+  group_by(met_site_with_No) %>%
+  summarise(across(pathways, mean, na.rm = TRUE))
+avg_scores<-column_to_rownames(avg_scores,"met_site_with_No")
+heatmap_matrix <- as.matrix(avg_scores)
+
+library(ComplexHeatmap)
+library(circlize)
+col_fun <- colorRamp2(
+  c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+  c("blue", "white", "red")
+)
+# Plot heatmap
+ht<-Heatmap(heatmap_matrix,
+            name = "Score",
+            col = col_fun,
+            cluster_rows = F,
+            cluster_columns = T,
+            column_dend_height = unit(0.5, "cm"),
+            width = unit(11.5, "cm"),   # 全体の幅を指定
+            height = unit(1.6, "cm"),
+            cell_fun = function(j, i, x, y, width, height, fill) {
+              if (asterisk_mat[i, j] != "") {
+                grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                          rot = 90, gp = gpar(fontsize = 8, col = "black"))
+              }
+            },
+            row_names_gp = gpar(fontsize = 7),  
+            column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+
+BCC_WOO_CNV_survival <-read_delim("BCC_WOO_CNV_survival.txt")
+
+
+idx<-match(rownames(gsva_results1),BCC_WOO_CNV_survival$Sample)
+rownames(gsva_results1)[is.na(idx)]
+idx<-match(BCC_WOO_CNV_survival$Sample,rownames(gsva_results1))
+BCC_WOO_CNV_survival$Sample[is.na(idx)]
+
+idx<-match(rownames(gsva_results1),BCC_WOO_CNV_survival$Sample)
+gsva_results1$KRASCNV<-BCC_WOO_CNV_survival$Copy.Number[idx]
+gsva_results1$KRASCNVstatus<-BCC_WOO_CNV_survival$KRASCNVstatus[idx]
+gsva_results1$MYCCNV<-BCC_WOO_CNV_survival$MYC.copy.number[idx]
+gsva_results1$MYCCNV_gain<-BCC_WOO_CNV_survival$MYC_GainLoss[idx]
+gsva_results1$KRAS_variant<-BCC_WOO_CNV_survival$KRAS_variant[idx]
+gsva_results1$Status_detailed<-BCC_WOO_CNV_survival$Status_detailed[idx]
+
+
+table(gsva_results1$Status_detailed)
+gsva_results1$Status_d_withNo<-NA
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="Normal/Loss"]<-"Normal/Loss (n=136)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="KRAS LOH"]<-"KRAS LOH (n=8)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="KRAS LOH/MYC gain"]<-"KRAS LOH/MYC gain (n=4)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="KRAS CNLOH"]<-"KRAS CNLOH (n=4)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="KRAS CNLOH/MYC gain"]<-"KRAS CNLOH/MYC gain (n=3)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="KRAS gain"]<-"KRAS gain (n=43)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="MYC gain"]<-"MYC gain (n=52)"
+gsva_results1$Status_d_withNo[gsva_results1$Status_detailed=="KRAS/MYC co-gain"]<-"KRAS/MYC co-gain (n=37)"
+gsva_results1$Status_d_withNo <- factor(gsva_results1$Status_d_withNo,levels=c("Normal/Loss (n=136)","KRAS LOH (n=8)","KRAS LOH/MYC gain (n=4)","KRAS CNLOH (n=4)","KRAS CNLOH/MYC gain (n=3)","KRAS gain (n=43)","MYC gain (n=52)","KRAS/MYC co-gain (n=37)"))
+table(gsva_results1$Status_d_withNo)
+
+table(gsva_results1$met_site,gsva_results1$Status_d_withNo)
+
+#remove samples without CNV data
+gsva_results2<-gsva_results1[!is.na(gsva_results1$Status_d_withNo),]
+
+
+#Focus only gain and normal
+gsva_results3<- subset(gsva_results2,subset=Status_d_withNo %in% c("KRAS/MYC co-gain (n=37)","KRAS gain (n=43)","MYC gain (n=52)","Normal/Loss (n=136)"))
+table(gsva_results3$Status_d_withNo)
+
+#Sup Fig 2B
+gsva_results3$Status_d_withNo <- factor(gsva_results3$Status_d_withNo,levels=c("KRAS/MYC co-gain (n=37)","MYC gain (n=52)","KRAS gain (n=43)","Normal/Loss (n=136)"))
+
+{dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ Status_d_withNo"))
+    model <- aov(formula, data = gsva_results3)
+    
+    dunnett_test <- glht(model, linfct = mcp(Status_d_withNo = "Dunnett"))
+    
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  
+  dunnett_results[[1]]
+  Status_levels <- levels(gsva_results3$Status_d_withNo)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  
+    
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  
+  avg_scores <- gsva_results3 %>%
+    group_by(Status_d_withNo) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  
+  avg_scores<-column_to_rownames(avg_scores,"Status_d_withNo")
+  
+  heatmap_matrix <- as.matrix(avg_scores)
+  #Some conflict restart-R before add these library
+  library(ComplexHeatmap)
+  library(circlize)
+  # --- 有意差ありの pathway を抽出（p < 0.05） ---
+  sig_pathways <- c()
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues
+    if (any(pval < 0.05)) {   # どこかの比較で有意差あり
+      sig_pathways <- c(sig_pathways, pw)
+    }
+  }
+  
+  if (length(sig_pathways) == 0) {
+    stop("有意差ありのpathwayはありませんでした。")
+  }
+  
+  # --- subset ---
+  heatmap_matrix_sig <- heatmap_matrix[, sig_pathways, drop = FALSE]
+  asterisk_mat_sig   <- asterisk_mat[, sig_pathways, drop = FALSE]
+  
+  # --- Heatmap 描画 ---
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+  
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix_sig, na.rm = TRUE),
+      mean(heatmap_matrix_sig, na.rm = TRUE),
+      max(heatmap_matrix_sig, na.rm = TRUE)),
+    c("blue", "white", "red")
+  )
+  
+  ht <- Heatmap(heatmap_matrix_sig,
+                name = "Score",
+                col = col_fun,
+                cluster_rows = F,
+                cluster_columns = TRUE,
+                column_dend_height = unit(0.5, "cm"),
+                width = unit(5.5, "cm"),
+                height = unit(1.2, "cm"),
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  if (asterisk_mat_sig[i, j] != "") {
+                    grid.text(asterisk_mat_sig[i, j], 
+                              x = x + width / 4, y = y,
+                              rot = 90, gp = gpar(fontsize = 6, col = "black"))
+                  }
+                },
+                row_names_gp = gpar(fontsize = 7),
+                column_names_rot = 45,
+                column_names_gp = gpar(fontsize = 5),
+                column_names_max_height = unit(10, "cm"))
+  
+  draw(ht, padding = unit(c(5, 5, 5, 5), "mm"))
+}
+
+#Fig 1C
+gsva_results3$Status_d_withNo <- factor(gsva_results3$Status_d_withNo,levels=c("Normal/Loss (n=136)","KRAS gain (n=43)","MYC gain (n=52)","KRAS/MYC co-gain (n=37)"))
+{dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ Status_d_withNo"))
+    model <- aov(formula, data = gsva_results3)
+    
+    dunnett_test <- glht(model, linfct = mcp(Status_d_withNo = "Dunnett"))
+    
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  
+  dunnett_results[[1]]
+  Status_levels <- levels(gsva_results3$Status_d_withNo)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  
+    
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  
+  avg_scores <- gsva_results3 %>%
+    group_by(Status_d_withNo) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  
+  avg_scores<-column_to_rownames(avg_scores,"Status_d_withNo")
+  
+  heatmap_matrix <- as.matrix(avg_scores)
+  #Some conflict restart-R before add these library
+  library(ComplexHeatmap)
+  library(circlize)
+  
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+    c("blue", "white", "red")
+  )
+  
+  # Plot heatmap
+  ht<-Heatmap(heatmap_matrix,
+              name = "Score",
+              col = col_fun,
+              cluster_rows = F,
+              cluster_columns = T,
+              column_dend_height = unit(0.5, "cm"),
+              width = unit(11.5, "cm"),   # 全体の幅を指定
+              height = unit(1.6, "cm"),
+              cell_fun = function(j, i, x, y, width, height, fill) {
+                if (asterisk_mat[i, j] != "") {
+                  grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                            rot = 90, gp = gpar(fontsize = 8, col = "black"))
+                }
+              },
+              row_names_gp = gpar(fontsize = 7),  
+              column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+  draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+##Sup Figure4E
+#
+library(rstatix)
+library(ggpubr)
+gsva_results3$Status_d_withNo <- factor(gsva_results3$Status_d_withNo,levels=c("Normal/Loss (n=136)","KRAS gain (n=43)","MYC gain (n=52)","KRAS/MYC co-gain (n=37)"))
+
+res.aov <- gsva_results3 %>% anova_test(BR_UP ~ Status_d_withNo)
+tukey.res <- gsva_results3 %>%
+  emmeans_test(BR_UP ~ Status_d_withNo, p.adjust.method = "fdr")
+tukey.res$group2 <- recode(tukey.res$group2, "KRAS/MYC co" = "KRAS/MYC co-gain (n=37)")
+tukey.res <- tukey.res %>%
+  add_xy_position(x = "Status_d_withNo")
+tukey.res
+tukey.res <- tukey.res %>%
+  mutate(p.label = sprintf("FDR = %.2f", p.adj))
+  
+p<-ggplot(gsva_results3, aes(x = Status_d_withNo, y = BR_UP)) + 
+  geom_jitter(width = 0.2, size = 0.2)+ 
+  stat_summary(fun = "mean", geom = "crossbar",color="red") + 
+  theme_minimal() + 
+  labs(title="BCCPC", y = "BR GSVA score",x=NULL)+
+  stat_pvalue_manual(tukey.res, label = "p.label", 
+                     tip.length = 0.01, step.increase = 0.1,size=1.5) +
+  coord_cartesian(ylim = c(min(gsva_results3$BR_UP), max(gsva_results3$BR_UP) * 2.7) )+  
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.title.y = element_text(size = 6),         
+    plot.title = element_text(hjust = 0.5, size = 10)
+  )
+p
+p<-egg::set_panel_size(p,width= unit(3, "cm"), height= unit(2.5, "cm"))
+ggsave("Sup Fig 4E.pdf", plot = p, width = 6, height = 7, units = "cm",dpi=300)
+
+
+
+G12D<-gsva_results3[gsva_results3$KRAS_variant=="p.G12D",]
+table(G12D$Status_d_withNo)
+G12D$Status_d_withNo<-NA
+G12D$Status_d_withNo[G12D$Status_detailed=="Normal/Loss"]<-"Normal/Loss (n=43)"
+G12D$Status_d_withNo[G12D$Status_detailed=="KRAS gain"]<-"KRAS gain (n=15)"
+G12D$Status_d_withNo[G12D$Status_detailed=="MYC gain"]<-"MYC gain (n=21)"
+G12D$Status_d_withNo[G12D$Status_detailed=="KRAS/MYC co-gain"]<-"KRAS/MYC co-gain (n=14)"
+G12D$Status_d_withNo <- factor(G12D$Status_d_withNo,levels=c("Normal/Loss (n=43)","KRAS gain (n=15)","MYC gain (n=21)","KRAS/MYC co-gain (n=14)"))
+
+res.aov <- G12D %>% anova_test(BR_UP ~ Status_d_withNo)
+tukey.res <- G12D %>%
+  emmeans_test(BR_UP ~ Status_d_withNo, p.adjust.method = "BH")
+tukey.res$group2 <- recode(tukey.res$group2, "KRAS/MYC co" = "KRAS/MYC co-gain (n=14)")
+tukey.res <- tukey.res %>%
+  add_xy_position(x = "Status_d_withNo")
+tukey.res
+tukey.res <- tukey.res %>%
+  mutate(p.label = sprintf("FDR= %.2e", p.adj))
+p<-ggplot(G12D, aes(x = Status_d_withNo, y = BR_UP)) + 
+  geom_jitter(width = 0.2, size = 0.2)+ 
+  stat_summary(fun = "mean", geom = "crossbar",color="red") + 
+  theme_minimal() + 
+  labs( y = "BR GSVA score",x=NULL,title="BCCPC KRASG12D")+
+  stat_pvalue_manual(tukey.res, label = "p.label", 
+                     tip.length = 0.01, step.increase = 0.06, size=1.5) +
+  coord_cartesian(ylim = c(min(G12D$BR_UP), max(G12D$BR_UP) * 2.6)) +  
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.title.y = element_text(size = 6),         
+    plot.title = element_text(hjust = 0.5, size = 10)
+  )
+p
+p<-egg::set_panel_size(p,width= unit(3, "cm"), height= unit(2, "cm"))
+ggsave("Fig 3I.pdf", plot = p, width = 6, height = 7, units = "cm",dpi=300)
+
+##Supplementary Figure1C Primary and Mets pathway comparison
+# Add Tumor_Type == "Primary|Met"
+gsva_results3$Tumor_Type = NA
+idx = grep("-[TFA]", rownames(gsva_results3))
+gsva_results3$Tumor_Type[idx] = "Primary"
+idx = grep("-[M]", rownames(gsva_results3))
+gsva_results3$Tumor_Type[idx] = "Met"
+
+
+Primary<-gsva_results3[gsva_results3$Tumor_Type=="Primary",]
+Mets<-gsva_results3[gsva_results3$Tumor_Type=="Met",]
+table(Primary$Status_detailed)
+Primary$Status_withNo<-NA
+Primary$Status_withNo[Primary$Status_detailed=="Normal/Loss"]<-"Primary_Normal/Loss (n=106)"
+Primary$Status_withNo[Primary$Status_detailed=="KRAS gain"]<-"Primary_KRAS gain (n=28)"
+Primary$Status_withNo[Primary$Status_detailed=="MYC gain"]<-"Primary_MYC gain (n=38)"
+Primary$Status_withNo[Primary$Status_detailed=="KRAS/MYC co-gain"]<-"Primary_KRAS/MYC co-gain (n=18)"
+Primary$Status_withNo<-factor(Primary$Status_withNo,level=c("Primary_Normal/Loss (n=106)","Primary_KRAS gain (n=28)","Primary_MYC gain (n=38)","Primary_KRAS/MYC co-gain (n=18)"))
+table(Mets$Status_detailed)
+Mets$Status_withNo<-NA
+Mets$Status_withNo[Mets$Status_detailed=="Normal/Loss"]<-"Metastasis_Normal/Loss (n=30)"
+Mets$Status_withNo[Mets$Status_detailed=="KRAS gain"]<-"Metastasis_KRAS gain (n=15)"
+Mets$Status_withNo[Mets$Status_detailed=="MYC gain"]<-"Metastasis_MYC gain (n=14)"
+Mets$Status_withNo[Mets$Status_detailed=="KRAS/MYC co-gain"]<-"Metastasis_KRAS/MYC co-gain (n=19)"
+Mets$Status_withNo<-factor(Mets$Status_withNo,level=c("Metastasis_Normal/Loss (n=30)","Metastasis_KRAS gain (n=15)","Metastasis_MYC gain (n=14)","Metastasis_KRAS/MYC co-gain (n=19)"))
+
+# Sup Fig 2D
+gsva_results4<-rbind(Primary,Mets)
+gsva_results4$Status_withNo<-factor(gsva_results4$Status_withNo,level=c("Primary_Normal/Loss (n=106)","Primary_KRAS gain (n=28)","Primary_MYC gain (n=38)","Primary_KRAS/MYC co-gain (n=18)","Metastasis_Normal/Loss (n=30)","Metastasis_KRAS gain (n=15)","Metastasis_MYC gain (n=14)","Metastasis_KRAS/MYC co-gain (n=19)"))
+
+{
+  dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ Status_withNo"))
+    model <- aov(formula, data = gsva_results4)
+    dunnett_test <- glht(model, linfct = mcp(Status_withNo = "Dunnett"))
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  dunnett_results[[1]]
+  Status_levels <- levels(gsva_results4$Status_withNo)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  # 比較する2番目のグループのp値
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  avg_scores <- gsva_results4 %>%
+    group_by(Status_withNo) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  avg_scores<-column_to_rownames(avg_scores,"Status_withNo")
+  heatmap_matrix <- as.matrix(avg_scores)
+  library(ComplexHeatmap)
+  library(circlize)
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+    c("blue", "white", "red")
+  )
+  # Plot heatmap
+  ht<-Heatmap(heatmap_matrix,
+              name = "Score",
+              col = col_fun,
+              cluster_rows = T,
+              cluster_columns = T,
+              row_dend_width = unit(0.5, "cm"),
+              column_dend_height = unit(0.5, "cm"),
+               width = unit(11.5, "cm"),
+              height = unit(2.4, "cm"),
+              cell_fun = function(j, i, x, y, width, height, fill) {
+                if (asterisk_mat[i, j] != "") {
+                  grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                            rot = 90, gp = gpar(fontsize = 6, col = "black"))
+                }
+              },
+              column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"),
+              row_names_gp = gpar(fontsize = 6))
+  
+  draw(ht, padding = unit(c(5, 40, 5, 20), "mm"),heatmap_legend_side = "right")
+}
+
+
+
+##Sup Fig 2E 
+#KRAS related gene signaling by MYC amp
+library(rstatix)
+library(ggpubr)
+data_cleaned_t<-data.frame(t(data_cleaned))
+idx<-match(rownames(data_cleaned_t),BCC_WOO_CNV_survival$Sample)
+data_cleaned_t$Status<-BCC_WOO_CNV_survival$Status_detailed[idx]
+data_cleaned_t$KRAS_variant<-BCC_WOO_CNV_survival$KRAS_variant[idx]
+data_cleaned_t_KRASnormal <- data_cleaned_t %>% filter(Status %in% c("Normal/Loss","MYC gain"))
+table(data_cleaned_t_KRASnormal$Status)
+data_cleaned_t_KRASnormal$Status<-factor(data_cleaned_t_KRASnormal$Status,levels=c("Normal/Loss","MYC gain"))
+table(data_cleaned_t_KRASnormal$Status)
+df_long <- data_cleaned_t_KRASnormal %>%
+  pivot_longer(
+    cols = -c(Status,KRAS_variant),             
+    names_to = "Gene",
+    values_to = "value"
+  )
+
+# 2. 全遺伝子で検定（例：Wilcoxon test）
+stat_all <- df_long %>%
+  group_by(Gene) %>%
+  wilcox_test(value ~ Status) %>%   # 2群比較（Normal/Loss vs MYC gainなど）
+  ungroup()
+
+# 3. FDR補正（全遺伝子まとめて）
+stat_all <- stat_all %>%
+  mutate(p.adj = p.adjust(p, method = "fdr")) %>%
+  add_significance("p.adj")
+
+stat_EGFR <- stat_all %>% filter(Gene == "EGFR")
+stat_EGFR_plot <- stat_EGFR %>%
+  mutate(
+    p.label = paste0("FDR = ", signif(p.adj, 2)),   # "FDR = 0.002" 形式
+    y.position = max(data_cleaned_t_KRASnormal$EGFR) * 1.1
+  )
+p<-ggplot(data_cleaned_t_KRASnormal, aes(x = Status, y = EGFR)) + 
+  geom_jitter(width = 0.2, size = 0.2) + 
+  stat_summary(fun = "mean", geom = "crossbar",color="red") + 
+  theme_minimal() + 
+  labs(title="EGFR", y = "log2(TPM+1)",x=NULL)+
+  stat_pvalue_manual(stat_EGFR_plot,
+                     label = "p.label",
+                     tip.length = 0,
+                     size = 1.7,vjust=-0.7)+
+  coord_cartesian(ylim = c(NA, max(data_cleaned_t_KRASnormal$EGFR) * 1.2)) + 
+  theme(
+    
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title.y = element_text(size = 6),         
+    plot.title = element_text(hjust = 0.5, size = 10),
+
+    
+  )
+p
+ggsave("new_EGFR_plot.pdf", p, width = 2.5, height = 4, units = "cm", dpi = 300)
+
+stat_ERBB2 <- stat_all %>% filter(Gene == "ERBB2")
+stat_ERBB2_plot <- stat_ERBB2 %>%
+  mutate(
+    p.label = paste0("FDR = ", signif(p.adj, 2)),   # "FDR = 0.002" 形式
+    y.position = max(data_cleaned_t_KRASnormal$ERBB2) * 1.1
+  )
+p<-ggplot(data_cleaned_t_KRASnormal, aes(x = Status, y = ERBB2)) + 
+  geom_jitter(width = 0.2, size = 0.2) + 
+  stat_summary(fun = "mean", geom = "crossbar",color="red") + 
+  theme_minimal() + 
+  labs(title="ERBB2", y = "log2(TPM+1)",x=NULL)+
+  stat_pvalue_manual(stat_ERBB2_plot,
+                     label = "p.label",
+                     tip.length = 0,
+                     size = 1.7,vjust=-0.5)+
+  coord_cartesian(ylim = c(NA, max(data_cleaned_t_KRASnormal$ERBB2) * 1.2)) + 
+  theme(
+    
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title.y = element_text(size = 6),         
+    plot.title = element_text(hjust = 0.5, size = 10),
+    
+    
+  )
+p
+ggsave("new_ERBB2_plot.pdf", p, width = 2.5, height = 4, units = "cm", dpi = 300)
+
+
+stat_ERBB3 <- stat_all %>% filter(Gene == "ERBB3")
+stat_ERBB3_plot <- stat_ERBB3 %>%
+  mutate(
+    p.label = paste0("FDR = ", signif(p.adj, 2)),   # "FDR = 0.002" 形式
+    y.position = max(data_cleaned_t_KRASnormal$ERBB3) * 1.1
+  )
+p<-ggplot(data_cleaned_t_KRASnormal, aes(x = Status, y = ERBB3)) + 
+  geom_jitter(width = 0.2, size = 0.2) + 
+  stat_summary(fun = "mean", geom = "crossbar",color="red") + 
+  theme_minimal() + 
+  labs(title="ERBB3", y = "log2(TPM+1)",x=NULL)+
+  stat_pvalue_manual(stat_ERBB3_plot,
+                     label = "p.label",
+                     tip.length = 0,
+                     size = 1.7,vjust=-0.5)+
+  coord_cartesian(ylim = c(NA, max(data_cleaned_t_KRASnormal$ERBB3) * 1.2)) + 
+  theme(
+    
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title.y = element_text(size = 6),         
+    plot.title = element_text(hjust = 0.5, size = 10)
+  )
+p
+ggsave("new_ERBB3_plot.pdf", p, width = 2.5, height = 4, units = "cm", dpi = 300)
+
+stat_KRAS <- stat_all %>% filter(Gene == "KRAS")
+stat_KRAS_plot <- stat_KRAS %>%
+  mutate(
+    p.label = paste0("FDR = ", signif(p.adj, 2)),   # "FDR = 0.002" 形式
+    y.position = max(data_cleaned_t_KRASnormal$KRAS) * 1.1
+  )
+p<-ggplot(data_cleaned_t_KRASnormal, aes(x = Status, y = KRAS)) + 
+  geom_jitter(width = 0.2, size = 0.2) + 
+  stat_summary(fun = "mean", geom = "crossbar",color="red") + 
+  theme_minimal() + 
+  labs(title="KRAS", y = "log2(TPM+1)",x=NULL)+
+  stat_pvalue_manual(stat_KRAS_plot,
+                     label = "p.label",
+                     tip.length = 0,
+                     size = 1.7,vjust=-0.5)+
+  coord_cartesian(ylim = c(NA, max(data_cleaned_t_KRASnormal$KRAS) * 1.2)) + 
+  theme(
+    
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title.y = element_text(size = 6),         
+    plot.title = element_text(hjust = 0.5, size = 10),
+    
+    
+  )
+p
+ggsave("new_KRAS_plot.pdf", p, width = 2.5, height = 4, units = "cm", dpi = 300)
+
+
+
+
+###################Sup Fig 1B detailed KRAS status and GSVA##############
+table(gsva_results2$KRASCNVstatus)
+gsva_results2$KRASCNVstatus_No[gsva_results2$KRASCNVstatus=="Normal/Loss"]<-"KRAS Normal/Loss (n=188)"
+gsva_results2$KRASCNVstatus_No[gsva_results2$KRASCNVstatus=="LOH"]<-"KRAS LOH (n=12)"
+gsva_results2$KRASCNVstatus_No[gsva_results2$KRASCNVstatus=="CNLOH"]<-"KRAS CNLOH (n=7)"
+gsva_results2$KRASCNVstatus_No[gsva_results2$KRASCNVstatus=="Minor_gain"]<-"KRAS Minor Gain (n=57)"
+gsva_results2$KRASCNVstatus_No[gsva_results2$KRASCNVstatus=="Major_gain"]<-"KRAS Major Gain (n=23)"
+
+gsva_results2$KRASCNVstatus_No <- factor(gsva_results2$KRASCNVstatus_No,levels=c("KRAS Normal/Loss (n=188)","KRAS LOH (n=12)","KRAS CNLOH (n=7)","KRAS Minor Gain (n=57)","KRAS Major Gain (n=23)"))
+{dunnett_results <- list()
+for (pw in pathways) {
+  formula <- as.formula(paste(pw, "~ KRASCNVstatus_No"))
+  model <- aov(formula, data = gsva_results2)
+  dunnett_test <- glht(model, linfct = mcp(KRASCNVstatus_No = "Dunnett"))
+  dunnett_results[[pw]] <- summary(dunnett_test)
+}
+dunnett_results[[1]]
+Status_levels <- levels(gsva_results2$KRASCNVstatus_No)
+asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                       dimnames = list(Status_levels, pathways))
+for (pw in pathways) {
+  result <- dunnett_results[[pw]]
+  pval <- result$test$pvalues  # 比較する2番目のグループのp値
+  for (i in 2:length(Status_levels)) {
+    if (pval[i-1] < 0.001) {
+      asterisk_mat[i, pw] <- "***"
+    } else if (pval[i-1] < 0.01) {
+      asterisk_mat[i, pw] <- "**"
+    } else if (pval[i-1] < 0.05) {
+      asterisk_mat[i, pw] <- "*"
+    }
+  }
+}
+avg_scores <- gsva_results2 %>%
+  group_by(KRASCNVstatus_No) %>%
+  summarise(across(pathways, mean, na.rm = TRUE))
+avg_scores<-column_to_rownames(avg_scores,"KRASCNVstatus_No")
+heatmap_matrix <- as.matrix(avg_scores)
+library(ComplexHeatmap)
+library(circlize)
+col_fun <- colorRamp2(
+  c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+  c("blue", "white", "red")
+)
+ht<-Heatmap(heatmap_matrix,
+            name = "Score",
+            col = col_fun,
+            cluster_rows = T,
+            cluster_columns = T,
+            width = unit(11.5, "cm"),   # 全体の幅を指定
+            height = unit(2, "cm"),
+            row_dend_width = unit(0.5, "cm"),
+            column_dend_height = unit(0.5,"cm"),
+            cell_fun = function(j, i, x, y, width, height, fill) {
+              if (asterisk_mat[i, j] != "") {
+                grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                          rot = 90, gp = gpar(fontsize = 8, col = "black"))
+              }
+            },
+            row_names_gp = gpar(fontsize = 7),  
+            column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+
+################### Sup Fig 1C combined KRAS status and GSVA##############
+table(gsva_results2$KRASCNVstatus)
+gsva_results2$KRASCNVstatus_c<-NA
+gsva_results2$KRASCNVstatus_c_No<-NA
+gsva_results2$KRASCNVstatus_c[gsva_results2$KRASCNVstatus=="Normal/Loss"]<-"Normal/Loss"
+gsva_results2$KRASCNVstatus_c[gsva_results2$KRASCNVstatus %in% c("LOH","CNLOH")]<-"LOH"
+gsva_results2$KRASCNVstatus_c[gsva_results2$KRASCNVstatus %in% c("Minor_gain","Major_gain")]<-"Gain"
+gsva_results2$KRASCNVstatus_c_No[gsva_results2$KRASCNVstatus=="Normal/Loss"]<-"KRAS Normal/Loss (n=188)"
+gsva_results2$KRASCNVstatus_c_No[gsva_results2$KRASCNVstatus %in% c("LOH","CNLOH")]<-"KRAS LOH (n=19)"
+gsva_results2$KRASCNVstatus_c_No[gsva_results2$KRASCNVstatus %in% c("Minor_gain","Major_gain")]<-"KRAS Gain (n=80)"
+
+gsva_results2$KRASCNVstatus_c_No <- factor(gsva_results2$KRASCNVstatus_c_No,levels=c("KRAS LOH (n=19)","KRAS Normal/Loss (n=188)","KRAS Gain (n=80)"))
+table(gsva_results2$KRASCNVstatus_c_No)
+{dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ KRASCNVstatus_c_No"))
+    model <- aov(formula, data = gsva_results2)
+    dunnett_test <- glht(model, linfct = mcp(KRASCNVstatus_c_No = "Dunnett"))
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  dunnett_results[[1]]
+  Status_levels <- levels(gsva_results2$KRASCNVstatus_c_No)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  # 比較する2番目のグループのp値
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  avg_scores <- gsva_results2 %>%
+    group_by(KRASCNVstatus_c_No) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  avg_scores<-column_to_rownames(avg_scores,"KRASCNVstatus_c_No")
+  heatmap_matrix <- as.matrix(avg_scores)
+  library(ComplexHeatmap)
+  library(circlize)
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+    c("blue", "white", "red")
+  )
+  ht<-Heatmap(heatmap_matrix,
+              name = "Score",
+              col = col_fun,
+              cluster_rows = T,
+              cluster_columns = T,row_dend_width = unit(0.5, "cm"),column_dend_height = unit(0.5, "cm"),
+              width = unit(11.5, "cm"),   # 全体の幅を指定
+              height = unit(1.2, "cm"),
+              cell_fun = function(j, i, x, y, width, height, fill) {
+                if (asterisk_mat[i, j] != "") {
+                  grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                            rot = 90, gp = gpar(fontsize = 8, col = "black"))
+                }
+              },
+              row_names_gp = gpar(fontsize = 7),  
+              column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+  draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+
+###################Sup Fig 1D MYC status and GSVA##############
+gsva_results2$MYCCNVstatus<-"Major Gain"
+gsva_results2$MYCCNVstatus[gsva_results2$MYCCNV %in% c("1","2")]<-"MYC Normal/Loss" #MYC loss is only 3 pt.
+gsva_results2$MYCCNVstatus[gsva_results2$MYCCNV %in% c("3")]<-"MYC minor Gain"
+table(gsva_results2$MYCCNVstatus)
+gsva_results2$MYCCNVstatus_withNo<-"Major Gain (n=28)"
+gsva_results2$MYCCNVstatus_withNo[gsva_results2$MYCCNV %in% c("1","2")]<-"MYC Normal/Loss (n=191)"
+gsva_results2$MYCCNVstatus_withNo[gsva_results2$MYCCNV %in% c("3")]<-"MYC minor Gain (n=68)"
+gsva_results2$MYCCNVstatus_withNo <- factor(gsva_results2$MYCCNVstatus_withNo,levels=c("MYC Normal/Loss (n=191)","MYC minor Gain (n=68)","Major Gain (n=28)"))
+{dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ MYCCNVstatus_withNo"))
+    model <- aov(formula, data = gsva_results2)
+    dunnett_test <- glht(model, linfct = mcp(MYCCNVstatus_withNo = "Dunnett"))
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  dunnett_results[[1]]
+  Status_levels <- levels(gsva_results2$MYCCNVstatus_withNo)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  # 比較する2番目のグループのp値
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  avg_scores <- gsva_results2 %>%
+    group_by(MYCCNVstatus_withNo) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  avg_scores<-column_to_rownames(avg_scores,"MYCCNVstatus_withNo")
+  heatmap_matrix <- as.matrix(avg_scores)
+  library(ComplexHeatmap)
+  library(circlize)
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+    c("blue", "white", "red")
+  )
+  ht<-Heatmap(heatmap_matrix,
+              name = "Score",
+              col = col_fun,
+              cluster_rows = T,
+              cluster_columns = T,
+              width = unit(11.5, "cm"),   # 全体の幅を指定
+              height = unit(1.2, "cm"),
+              row_dend_width = unit(0.5, "cm"),
+              column_dend_height = unit(0.5, "cm"),
+              cell_fun = function(j, i, x, y, width, height, fill) {
+                if (asterisk_mat[i, j] != "") {
+                  grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                            rot = 90, gp = gpar(fontsize = 8, col = "black"))
+                }
+              },
+              row_names_gp = gpar(fontsize = 7),  
+              column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+  draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+
+gsva_results2$MYCCNVstatus_withNo <- factor(gsva_results2$MYCCNVstatus_withNo,levels=c("MYC minor Gain (n=68)","MYC Normal/Loss (n=191)","Major Gain (n=28)"))
+{dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ MYCCNVstatus_withNo"))
+    model <- aov(formula, data = gsva_results2)
+    dunnett_test <- glht(model, linfct = mcp(MYCCNVstatus_withNo = "Dunnett"))
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  dunnett_results[[1]]
+  Status_levels <- levels(gsva_results2$MYCCNVstatus_withNo)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  # 比較する2番目のグループのp値
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  avg_scores <- gsva_results2 %>%
+    group_by(MYCCNVstatus_withNo) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  avg_scores<-column_to_rownames(avg_scores,"MYCCNVstatus_withNo")
+  heatmap_matrix <- as.matrix(avg_scores)
+  library(ComplexHeatmap)
+  library(circlize)
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+    c("blue", "white", "red")
+  )
+  ht<-Heatmap(heatmap_matrix,
+              name = "Score",
+              col = col_fun,
+              cluster_rows = T,
+              cluster_columns = T,
+              width = unit(11.5, "cm"),   # 全体の幅を指定
+              height = unit(2, "cm"),
+              row_dend_width = unit(0.5, "cm"),
+              cell_fun = function(j, i, x, y, width, height, fill) {
+                if (asterisk_mat[i, j] != "") {
+                  grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                            rot = 90, gp = gpar(fontsize = 8, col = "black"))
+                }
+              },
+              row_names_gp = gpar(fontsize = 7),  
+              column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+  draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+
+
+############Figure1F KRAS variant and GSVA
+table(gsva_results1$KRAS_variant)
+is.na(gsva_results1$KRAS_variant)
+
+G12D<-gsva_results3[gsva_results3$KRAS_variant=="p.G12D",]
+G12V<-gsva_results3[gsva_results3$KRAS_variant=="p.G12V",]
+G12R<-gsva_results3[gsva_results3$KRAS_variant=="p.G12R",]
+
+
+
+G12DRV<-rbind(G12D,G12V,G12R)
+
+G12DRV$KRASCNVstatus_c[G12DRV$KRASCNVstatus %in% c("Minor_gain","Major_gain")]<-"Gain"
+G12DRV$KRASCNVstatus_c[G12DRV$KRASCNVstatus %in% c("Normal/Loss")]<-"Normal/Loss"
+G12DRV$Status_variant <- paste(G12DRV$KRAS_variant,G12DRV$KRASCNVstatus_c,  sep = "_")
+table(G12DRV$Status_variant)
+G12DRV$Status_variant_no[G12DRV$Status_variant =="p.G12D_Gain"]<-"p.G12D_Gain (n=29)"
+G12DRV$Status_variant_no[G12DRV$Status_variant =="p.G12V_Gain"]<-"p.G12V_Gain (n=24)"
+G12DRV$Status_variant_no[G12DRV$Status_variant =="p.G12R_Gain"]<-"p.G12R_Gain (n=5)"
+G12DRV$Status_variant_no[G12DRV$Status_variant =="p.G12D_Normal/Loss"]<-"p.G12D_Normal/Loss (n=64)"
+G12DRV$Status_variant_no[G12DRV$Status_variant =="p.G12V_Normal/Loss"]<-"p.G12V_Normal/Loss (n=46)"
+G12DRV$Status_variant_no[G12DRV$Status_variant =="p.G12R_Normal/Loss"]<-"p.G12R_Normal/Loss (n=20)"
+
+G12DRV$Status_variant_no <- factor(G12DRV$Status_variant_no,levels=c("p.G12V_Normal/Loss (n=46)","p.G12D_Gain (n=29)","p.G12R_Normal/Loss (n=20)","p.G12D_Normal/Loss (n=64)","p.G12V_Gain (n=24)","p.G12R_Gain (n=5)"))
+
+{dunnett_results <- list()
+  for (pw in pathways) {
+    formula <- as.formula(paste(pw, "~ Status_variant_no"))
+    model <- aov(formula, data = G12DRV)
+    dunnett_test <- glht(model, linfct = mcp(Status_variant_no = "Dunnett"))
+    dunnett_results[[pw]] <- summary(dunnett_test)
+  }
+  dunnett_results[[1]]
+  Status_levels <- levels(G12DRV$Status_variant_no)
+  asterisk_mat <- matrix("", nrow = length(Status_levels), ncol = length(pathways), 
+                         dimnames = list(Status_levels, pathways))
+  for (pw in pathways) {
+    result <- dunnett_results[[pw]]
+    pval <- result$test$pvalues  # 比較する2番目のグループのp値
+    for (i in 2:length(Status_levels)) {
+      if (pval[i-1] < 0.001) {
+        asterisk_mat[i, pw] <- "***"
+      } else if (pval[i-1] < 0.01) {
+        asterisk_mat[i, pw] <- "**"
+      } else if (pval[i-1] < 0.05) {
+        asterisk_mat[i, pw] <- "*"
+      }
+    }
+  }
+  avg_scores <- G12DRV %>%
+    group_by(Status_variant_no) %>%
+    summarise(across(pathways, mean, na.rm = TRUE))
+  avg_scores<-column_to_rownames(avg_scores,"Status_variant_no")
+  heatmap_matrix <- as.matrix(avg_scores)
+  library(ComplexHeatmap)
+  library(circlize)
+  col_fun <- colorRamp2(
+    c(min(heatmap_matrix), mean(heatmap_matrix), max(heatmap_matrix)),
+    c("blue", "white", "red")
+  )
+  ht<-Heatmap(heatmap_matrix,
+              name = "Score",
+              col = col_fun,
+              cluster_rows = T,
+              cluster_columns = T,
+              column_dend_height = unit(0.5, "cm"),
+              row_dend_width = unit(0.5, "cm"),
+              width = unit(11.5, "cm"),   # 全体の幅を指定
+              height = unit(2.4, "cm"),
+              cell_fun = function(j, i, x, y, width, height, fill) {
+                if (asterisk_mat[i, j] != "") {
+                  grid.text(asterisk_mat[i, j], x = x + width / 4, y =y, 
+                            rot = 90, gp = gpar(fontsize = 8, col = "black"))
+                }
+              },
+              row_names_gp = gpar(fontsize = 7),  
+              column_names_rot = 45,column_names_gp = gpar(fontsize = 5),column_names_max_height = unit(10, "cm"))
+  draw(ht, padding = unit(c(5, 40, 5, 5), "mm"))
+}
+
+
+#Figure 3H BR score vs other scores　
+df_num <- gsva_results1[, sapply(gsva_results1, is.numeric)]
+df_num <- df_num[, !(colnames(df_num) %in% c("KRASCNV","MYCCNV","pORG","pSUB","PDAC_KRAS_UP","PDAC_KRAS_DOWN","PDAC_KRAS_ERK_DOWN","KRAS_ERK_median_rank_UP","KRAS_ERK_median_rank_DOWN","KRAS_SIGNALING_UP","KRAS_SIGNALING_DN"))]
+cor_results <- data.frame(
+  signature = setdiff(colnames(df_num), "BR_UP"),
+  r = NA,
+  p = NA
+)
+for (i in seq_len(nrow(cor_results))) {
+  sig <- cor_results$signature[i]
+  ct <- cor.test(df_num$BR_UP, df_num[[sig]], use = "complete.obs")
+  cor_results$r[i] <- ct$estimate
+  cor_results$p[i] <- ct$p.value
+}
+cor_results$FDR <- p.adjust(cor_results$p, method = "fdr")
+cor_results$signif <- cut(cor_results$FDR,
+                          breaks = c(-Inf, 0.0001, 0.001, 0.01, 0.05, Inf),
+                          labels = c("****", "***", "**", "*", "")
+)
+cor_sig <- subset(cor_results, FDR < 0.01)
+cor_sig$logFDR <- -log10(cor_sig$FDR)
+p<-ggplot(cor_sig, aes(x = reorder(signature, r), y = r)) +
+  geom_point(aes(color = logFDR), size = 1.5, alpha = 0.9) +
+  scale_color_gradient(low = "blue", high = "red", name = "-log10(FDR)") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  theme_classic(base_size = 12) +
+  labs(
+    x = NULL,
+    y = "r value (Pearson)",
+    title = "Correlations with BR score (FDR < 0.01)"
+  ) +
+  theme(
+    axis.text.x = element_text(size = 5, angle=45, hjust=1),
+    axis.text.y = element_text(size = 5),
+    axis.title.y = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5,size=10),
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 60), 
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 5)
+  ) +
+  guides(
+    color = guide_colorbar(
+      title.position = "top",     
+      title.hjust = 0.5,          
+      barwidth = 0.3,              
+      barheight = 2               
+    ))
+p
+q<-egg::set_panel_size(p,width= unit(9, "cm"), height= unit(1.5, "cm"))
+ggsave("BR_vs_other_sig.pdf",q, width = 14, height = 7, units = "cm")
+
+
+idx<-match(rownames(normalizedcount),rownames(gsva_results1))
+normalizedcount$BR_score<-gsva_results1$BR_UP[idx]
+
+r_test <- cor.test(normalizedcount$BR_score, normalizedcount$CD, use = "complete.obs")
+r_val <- round(r_test$estimate, 3)
+p_val <- signif(r_test$p.value, 3)
+p<-ggplot(gsva_results, aes(x = RMC7977, y = BR_UP)) +
+  geom_point( size = 0.5, color = "black") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +  # optional regression line
+  theme_minimal() +
+  labs(title = "DEPMAP"~ italic("KRAS")~ "mutant",x = "RMC7977 AUC",y = "BR GSVA score")+
+  annotate("text",x = Inf, y = Inf,label = paste0("r = ", r_val, "\np = ", p_val), hjust = 1.1, vjust = 1.5, size = 2, color = "black")+
+  theme(panel.grid = element_blank(),        # remove background grid lines
+        axis.line = element_line(),          # add axis lines
+        axis.ticks = element_line(),
+        axis.text.x = element_text(size = 6,hjust=1),
+        axis.text.y = element_text(size = 6,hjust=1),
+        axis.title.x = element_text(size = 6,hjust=0.5),  
+        axis.title.y = element_text(size = 6,hjust=0.5),         
+        plot.title = element_text(hjust = 0.5, size = 10)
+  )
