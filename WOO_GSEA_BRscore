@@ -1,0 +1,209 @@
+# Set up Seurat object
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(DESeq2)
+library(tidyverse)
+library(batchelor)
+library(reticulate)
+options("preferRaster" = FALSE)
+library(DESeq2)
+library(qusage)
+library(org.Hs.eg.db)
+library(magrittr)
+library(readr)
+library(GSVA)
+library(ComplexHeatmap)
+library(EnhancedVolcano)
+library(biomaRt)
+library(sva)
+
+
+
+data<-read.delim("WOO unnormalized.txt")
+
+####Pre analysis
+keep<-c("ST-00022975-M","ST-00022941-M","ST-00022524-M","ST-00020270-M","ST-00024058-M","ST-00026156-M","ST-00026018-M","ST-00027930-M","ST-00024653-M")
+data_pre<-data[,keep]
+
+keep <- rowSums(data_pre>=10)>=3
+data_pre <- data_pre[keep,]
+colnames(data_pre)
+
+colData<-colnames(data_pre)
+response<-c("BR","BR","non-BR","BR","non-BR","BR","non-BR","non-BR","non-BR")
+colData<-cbind(colData,response)
+dds_pre<-DESeqDataSetFromMatrix(round(data_pre), colData = colData, design=~response)
+
+#Run DEseq to generate BR score
+dds_pre<-DESeq(dds_pre)
+vsd<-vst(dds_pre)
+plotPCA(vsd,"colData")
+
+res<-results(dds_pre,contrast=c("response","BR","non-BR"))
+res <- res[!is.na(res$padj),]
+df<-as.data.frame(res)
+
+mart <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+ensemble2 <- getBM(
+  attributes = c("external_gene_name", "ensembl_gene_id"),
+  filters    = "ensembl_gene_id",
+  values     = rownames(df),   # ddsの遺伝子ID
+  mart       = mart
+)
+
+idx <- match(rownames(df), ensemble2$ensembl_gene_id)
+gene_symbols <- ensemble2$external_gene_name[idx]
+df$gene_symbols <- gene_symbols
+df$ensembl_gene_id <- rownames(df)
+df <- df %>%
+  filter(!is.na(gene_symbols)) %>%
+  filter(gene_symbols != "") %>%  
+  filter(!grepl("^LOC[0-9]+", gene_symbols)) %>%
+  filter(!grepl("^LINK[0-9]+", gene_symbols)) %>%
+  filter(!grepl("orf", gene_symbols, ignore.case = TRUE))
+numeric_cols <- sapply(df, is.numeric)
+df <- df %>%
+  arrange(gene_symbols, pvalue) %>%
+  distinct(gene_symbols, .keep_all = TRUE)
+
+rownames(df) <- df$gene_symbols
+df$gene_symbols <- NULL
+df$ensembl_gene_id <- NULL
+
+
+
+BR_UP<-df[df$log2FoldChange >1 & df$pvalue<0.05,]
+rownames(BR_UP)
+BR_UP<-list(rownames(BR_UP))
+names(BR_UP)<-"BR_UP"
+
+#Create imput for GSEA
+norm_counts<-counts(dds_pre,normalized=T)
+gene_info <- data.frame(Name = rownames(norm_counts), Description = "NA")
+gct_df <- cbind(gene_info, as.data.frame(norm_counts))
+outfile <- "~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/RNAseq/WOO_pre_DEseq2/normalized_counts_pre_to36_with_26.gct"
+n_rows <- nrow(gct_df)
+n_cols <- ncol(gct_df) - 2  # excluding Name, Description
+
+# Write header lines
+cat("#1.2\n", file = outfile)
+cat(paste(n_rows, n_cols, sep = "\t"), "\n", file = outfile, append = TRUE)
+
+# Write data table
+write.table(
+  gct_df,
+  file = outfile,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  append = TRUE
+)
+cat("✅ GCT file saved as:", outfile, "\n")
+
+classes<-as.character(colData(dds_pre)$response)
+samples<-colnames(dds_pre)
+unique_classes <- unique(classes)
+num_classes <- length(unique_classes)
+num_samples <- length(samples)
+line1 <- paste(num_samples, num_classes, "1", sep = " ")
+line2 <- paste("#", paste(unique_classes, collapse = " "), sep = " ")
+line3 <- paste(classes, collapse = " ")
+
+# --- Write to file ---
+cls_file <- "~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/RNAseq/WOO_pre_DEseq2/normalized_counts_pre_to36_with_26.cls"
+writeLines(c(line1, line2, line3), con = cls_file)
+
+cat("✅ CLS file saved as:", cls_file, "\n")
+cat("Classes:\n")
+print(table(classes))
+
+
+
+
+
+
+
+
+####Pre_post GSEA#####
+####pair all
+keep<-c("ST-00020270-M","ST-00020270-M2","ST-00022524-M","ST-00022524-M2","ST-00022975-M","ST-00022975-M2","ST-00024058-M","ST-00024058-M2","ST-00027930-M","ST-00027930-M2","ST-00024653-M","ST-00024653-M2")
+data_pair<-data[,keep]
+colData<-colnames(data_pair)
+patient=factor(c("1","1","1","1","2","2","2","2","3","3","4","4"))
+colData<-cbind(colData,patient)
+dds_pair<-DESeqDataSetFromMatrix(round(data_pair),colData=colData,design=~colData)
+dds_pair$patient=factor(c("1","1","1","1","2","2","2","2","3","3","4","4"))
+dds_pair$response=factor(c("BR","BR","non-BR","non-BR","BR","BR","non-BR","non-BR","non-BR","non-BR","non-BR","non-BR"))
+dds_pair$prepost=factor(c("M","M2","M","M2","M","M2","M","M2","M","M2","M","M2"))
+
+vsd<-vst(dds_pair)
+plotPCA(vsd,"colData")
+design(dds_pair)<-~patient+prepost
+keep <- rowSums(counts(dds_pair)>=10)>=3
+dds_pair <- dds_pair[keep,]
+dds_pair<-DESeq(dds_pair)  #error if add woo_ID in design
+resultsNames(dds_pair)
+#BR_vs_nonBR_post
+res<-results(dds_pair,name="prepost_M2_vs_M")
+res <- res[!is.na(res$padj),]
+df<-as.data.frame(res)
+rownames(df) <- sub('\\.[0-9]*$', '', as.vector(rownames(df)))
+mart <- useMart("ensembl","hsapiens_gene_ensembl")
+ensemble2 <- getBM(attributes=c("external_gene_name","ensembl_gene_id"),
+                   filters = "ensembl_gene_id",
+                   values = rownames(df), 
+                   mart = mart)
+idx = match(x=ensemble2$ensembl_gene_id, table=rownames(df))
+df <- c(ensemble2,df[idx,])
+df<-as.data.frame(df)
+df$rnk<--log10(df$pvalue)*df$log2FoldChange
+
+rnk_df <- df[, c("external_gene_name", "rnk")]
+rnk_df <- rnk_df[!is.na(rnk_df$external_gene_name) & rnk_df$external_gene_name != "", ]
+rnk_df <- rnk_df[order(rnk_df$rnk, decreasing = TRUE), ]
+write.table(
+  rnk_df,
+  file = "~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/RNAseq/WOO_GSEA_input_tempus_batchcorrected/pair_post_pre.rnk",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+####pair BRvsnonBR
+
+
+design(dds_pair)<-~response+response:patient+response:prepost
+model.matrix<-model.matrix(~ response+response:patient+response:prepost, colData(dds_pair))
+model.matrix <- model.matrix[,-c(5,7)]
+keep <- rowSums(counts(dds_pair)>=10)>=3
+dds_pair <- dds_pair[keep,]
+dds_pair<-DESeq(dds_pair,full = model.matrix)  #error if add woo_ID in design
+resultsNames(dds_pair)
+#BR_vs_nonBR_post
+res<-results(dds_pair,contrast=list("responseBR.prepostM2","responsenon.BR.prepostM2"))
+res <- res[!is.na(res$padj),]
+df<-as.data.frame(res)
+rownames(df) <- sub('\\.[0-9]*$', '', as.vector(rownames(df)))
+mart <- useMart("ensembl","hsapiens_gene_ensembl")
+ensemble2 <- getBM(attributes=c("external_gene_name","ensembl_gene_id"),
+                   filters = "ensembl_gene_id",
+                   values = rownames(df), 
+                   mart = mart)
+idx = match(x=ensemble2$ensembl_gene_id, table=rownames(df))
+df <- c(ensemble2,df[idx,])
+df<-as.data.frame(df)
+df$rnk<--log10(df$pvalue)*df$log2FoldChange
+rnk_df <- df[, c("external_gene_name", "rnk")]
+rnk_df <- rnk_df[!is.na(rnk_df$external_gene_name) & rnk_df$external_gene_name != "", ]
+rnk_df <- rnk_df[order(rnk_df$rnk, decreasing = TRUE), ]
+write.table(
+  rnk_df,
+  file = "~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/RNAseq/WOO_GSEA_input_tempus_batchcorrected/pair_post_pre_BR_nonBR.rnk",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
