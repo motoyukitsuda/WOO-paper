@@ -1,0 +1,846 @@
+library(Seurat)
+library(SeuratWrappers)
+library(SeuratData)
+library(SeuratDisk)
+library(SeuratObject)
+library(scCustomize)
+library(GeneNMF)
+library(tidyverse)
+library(ggpubr)
+library(dittoSeq)
+library(EnhancedVolcano)
+library(qs)
+setwd("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/WOOM paper firgure from prism")
+#load filterd sample
+mat_path <- "/Users/motoyuki/Desktop/Sears_lab/Experiment/single_cell_RNA_seq/303JMRTX/DGE_filtered"
+mat <- ReadParseBio(mat_path)
+# Check to see if empty gene names are present, add name if so.
+table(rownames(mat) == "")
+rownames(mat)[rownames(mat) == ""] <- "unknown"
+# Read in cell meta data
+cell_meta <- read.csv(paste0(mat_path, "/cell_metadata.csv"), row.names = 1)
+# Create object
+KMCs<- CreateSeuratObject(mat, assay = "RNA", min.cells = 3,
+                             names.field = 0, meta.data = cell_meta)
+KMCs<-subset(KMCs,subset=sample %in% c("519u","522u","542u","550u","552u","640u","641u","646u") )
+
+
+KMCs$treatment<-NA
+KMCs$treatment[KMCs$sample=="519u"]<-"MRTX_late_301J"
+KMCs$treatment[KMCs$sample=="522u"]<-"MRTX_301J"
+KMCs$treatment[KMCs$sample=="542u"]<-"Ctrl_301J"
+KMCs$treatment[KMCs$sample=="550u"]<-"Ctrl_301J"
+KMCs$treatment[KMCs$sample=="552u"]<-"MRTX_late_301J"
+KMCs$treatment[KMCs$sample=="640u"]<-"MRTX_late_303J"
+KMCs$treatment[KMCs$sample=="641u"]<-"Ctrl_303J"
+KMCs$treatment[KMCs$sample=="646u"]<-"MRTX_303J"
+
+
+
+
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+KMCs[["percent.mt"]] <- PercentageFeatureSet(KMCs, pattern = "^mt-")
+
+# Visualize QC metrics as a violin plot
+Idents(KMCs)<-"sample"
+VlnPlot(KMCs, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3,group.by="species")
+FeatureScatter(KMCs, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(KMCs, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+VlnPlot(KMCs, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3,group.by="sample")
+
+KMCs$log10GenesPerUMI <- log10(KMCs$nFeature_RNA) / log10(KMCs$nCount_RNA)
+FeatureScatter(KMCs, feature1 = "log10GenesPerUMI", feature2 = "nFeature_RNA",group.by="treatment")
+
+KMCs_beforeQC<-KMCs
+
+
+saveRDS(KMCs_beforeQC,"~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/WOOM paper repository/KMC_scRNA_count.rds")
+#remove unhealthy cells
+
+KMCs<- subset(KMCs_beforeQC, subset = nFeature_RNA > 200 & percent.mt < 10)
+
+
+
+#Number of cells
+Idents(KMCs)<-"sample"
+table(Idents(KMCs))
+
+# Split by layer
+KMCs[["RNA"]]<-split(KMCs[["RNA"]], f=KMCs$sample)
+
+################## standerd workflow ########################
+KMCs<-NormalizeData(KMCs)
+KMCs<-FindVariableFeatures(KMCs)
+KMCs<-ScaleData(KMCs)
+KMCs<-RunPCA(KMCs)
+KMCs<-IntegrateLayers(KMCs, method=HarmonyIntegration,orig.reduction = "pca",new.reduction = "harmony")
+KMCs<- FindNeighbors(KMCs, reduction = "harmony", dims = 1:30)
+KMCs<- FindClusters(KMCs, resolution = 0.1, cluster.name = "seurat_clusters")
+KMCs<- RunUMAP(KMCs, dims = 1:30, reduction = "harmony",reduction.name = "umap")
+DimPlot(KMCs, reduction="umap",group.by="seurat_clusters",label=T)
+DimPlot(KMCs, reduction="umap",group.by="seurat_clusters",split.by = "treatment")
+
+
+
+#Doubletfinder
+a519u<-subset(KMCs,subset=sample=="519u")
+sweep.res.list_a519u <- paramSweep(a519u, PCs = 1:10, sct = FALSE)
+sweep.stats_a519u <- summarizeSweep(sweep.res.list_a519u, GT = FALSE)
+bcmvn_a519u <- find.pK(sweep.stats_a519u)
+pK <- bcmvn_a519u$pK[which.max(bcmvn_a519u$BCmetric)]; pK<- as.numeric(levels(pK))[pK]; pK 
+nExp_poi <- round(0.084*nrow(a519u@meta.data))
+a519u <- doubletFinder(a519u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a519u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a519u@meta.data <- metadata 
+
+
+a522u<-subset(KMCs,subset=sample=="522u")
+sweep.res.list_a522u <- paramSweep(a522u, PCs = 1:10, sct = FALSE)
+sweep.stats_a522u <- summarizeSweep(sweep.res.list_a522u, GT = FALSE)
+bcmvn_a522u <- find.pK(sweep.stats_a522u)
+pK <- bcmvn_a522u$pK[which.max(bcmvn_a522u$BCmetric)]; pK<- as.numeric(levels(pK))[pK]; pK 
+nExp_poi <- round(0.084*nrow(a522u@meta.data))
+a522u <- doubletFinder(a522u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a522u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a522u@meta.data <- metadata 
+
+
+a542u<-subset(KMCs,subset=sample=="542u")
+sweep.res.list_a542u <- paramSweep(a542u, PCs = 1:10, sct = FALSE)
+sweep.stats_a542u <- summarizeSweep(sweep.res.list_a542u, GT = FALSE)
+bcmvn_a542u <- find.pK(sweep.stats_a542u)
+pK <- bcmvn_a542u$pK[which.max(bcmvn_a542u$BCmetric)]; pK <- as.numeric(levels(pK))[pK]; pK
+nExp_poi <- round(0.084*nrow(a542u@meta.data))
+a542u <- doubletFinder(a542u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a542u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a542u@meta.data <- metadata 
+
+a550u<-subset(KMCs,subset=sample=="550u")
+sweep.res.list_a550u <- paramSweep(a550u, PCs = 1:10, sct = FALSE)
+sweep.stats_a550u <- summarizeSweep(sweep.res.list_a550u, GT = FALSE)
+bcmvn_a550u <- find.pK(sweep.stats_a550u)
+pK <- bcmvn_a550u$pK[which.max(bcmvn_a550u$BCmetric)]; pK <- as.numeric(levels(pK))[pK]; pK
+nExp_poi <- round(0.084*nrow(a550u@meta.data))
+a550u <- doubletFinder(a550u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a550u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a550u@meta.data <- metadata 
+
+a552u<-subset(KMCs,subset=sample=="552u")
+sweep.res.list_a552u <- paramSweep(a552u, PCs = 1:10, sct = FALSE)
+sweep.stats_a552u <- summarizeSweep(sweep.res.list_a552u, GT = FALSE)
+bcmvn_a552u <- find.pK(sweep.stats_a552u)
+pK <- bcmvn_a552u$pK[which.max(bcmvn_a552u$BCmetric)]; pK <- as.numeric(levels(pK))[pK]; pK
+nExp_poi <- round(0.084*nrow(a552u@meta.data))
+a552u <- doubletFinder(a552u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a552u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a552u@meta.data <- metadata 
+
+a640u<-subset(KMCs,subset=sample=="640u")
+sweep.res.list_a640u <- paramSweep(a640u, PCs = 1:10, sct = FALSE)
+sweep.stats_a640u <- summarizeSweep(sweep.res.list_a640u, GT = FALSE)
+bcmvn_a640u <- find.pK(sweep.stats_a640u)
+pK <- bcmvn_a640u$pK[which.max(bcmvn_a640u$BCmetric)]; pK <- as.numeric(levels(pK))[pK]; pK
+nExp_poi <- round(0.084*nrow(a640u@meta.data))
+a640u <- doubletFinder(a640u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a640u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a640u@meta.data <- metadata 
+
+a641u<-subset(KMCs,subset=sample=="641u")
+sweep.res.list_a641u <- paramSweep(a641u, PCs = 1:10, sct = FALSE)
+sweep.stats_a641u <- summarizeSweep(sweep.res.list_a641u, GT = FALSE)
+bcmvn_a641u <- find.pK(sweep.stats_a641u)
+pK <- bcmvn_a641u$pK[which.max(bcmvn_a641u$BCmetric)]; pK <- as.numeric(levels(pK))[pK]; pK
+nExp_poi <- round(0.084*nrow(a641u@meta.data))
+a641u <- doubletFinder(a641u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a641u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a641u@meta.data <- metadata 
+
+a646u<-subset(KMCs,subset=sample=="646u")
+sweep.res.list_a646u <- paramSweep(a646u, PCs = 1:10, sct = FALSE)
+sweep.stats_a646u <- summarizeSweep(sweep.res.list_a646u, GT = FALSE)
+bcmvn_a646u <- find.pK(sweep.stats_a646u)
+pK <- bcmvn_a646u$pK[which.max(bcmvn_a646u$BCmetric)]; pK <- as.numeric(levels(pK))[pK]; pK
+nExp_poi <- round(0.084*nrow(a646u@meta.data))
+a646u <- doubletFinder(a646u, PCs = 1:10, pN = 0.25, pK = pK, nExp = nExp_poi, reuse.pANN = NULL, sct = FALSE)
+metadata <- a646u@meta.data
+colnames(metadata)[20] <- "doublet_finder"
+a646u@meta.data <- metadata 
+
+KMCs<-merge(x=a519u,y=c(a522u,a542u,a550u,a552u,a640u,a641u,a646u),merge.data=T)
+
+
+KMCs<-JoinLayers(KMCs)
+KMCs[["RNA"]]<-split(KMCs[["RNA"]],f=KMCs$sample)
+KMCs<-FindVariableFeatures(KMCs)
+KMCs<-ScaleData(KMCs)
+KMCs<-RunPCA(KMCs)
+KMCs<-IntegrateLayers(KMCs, method=HarmonyIntegration,dims=1:30, orig.reduction = "pca",new.reduction = "harmony")
+KMCs<- FindNeighbors(KMCs, reduction = "harmony", dims = 1:30)
+KMCs<- FindClusters(KMCs, resolution = 0.8, cluster.name = "harmony_clusters")
+KMCs<- RunUMAP(KMCs, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(KMCs, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+DimPlot(KMCs,group.by="doublet_finder")
+KMCs<-subset(KMCs, subset=doublet_finder=="Singlet")
+
+
+KMCs<-FindVariableFeatures(KMCs)
+KMCs<-ScaleData(KMCs)
+KMCs<-RunPCA(KMCs)
+KMCs<-IntegrateLayers(KMCs, method=HarmonyIntegration,dims=1:30, orig.reduction = "pca",new.reduction = "harmony")
+KMCs<- FindNeighbors(KMCs, reduction = "harmony", dims = 1:30)
+KMCs<- FindClusters(KMCs, resolution = 0.8, cluster.name = "harmony_clusters")
+KMCs<- RunUMAP(KMCs, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(KMCs, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+
+DotPlot(KMCs,features=c("Cd3d","Cd3g","Cd3e","Il7r","Cd4","Cd8a","Cd8b","Slc4a10","Ncam1","Klrf1","Ms4a1","Ms4a2","Cd79a","Ighm","Ighg1","Lyz","Cd14","Fcgr3a","Ms4a7","Clec4c","Lilra4","Fcer1a","Cd34","Spink2","Cel","Krt19","Clu","Sox9","Lox","Esam","Pdgfra","Pdgfrb","Pecam1","Mki67","S100a9","Naaa","Cd209a","Ccl22","Ccl5"),group.by="harmony_clusters")+RotatedAxis()
+DotPlot(KMCs,features=c("Krt19","Epcam","Sox9","Cpa1","Vim","Col1a1","Dcn","Acta2","Rgs5","Pecam1","Cd34","Cd3e","Cd4","Cd8a","Il7r","Klrd1","Cd79a","Ms4a1","Igha1","Fcer1g","Cd68","H2-Aa","Cd74","Itgax","Clu","Ms4a2","S100a8","Gzmb","Mki67","Top2a","Hbb"),group.by="harmony_clusters")+RotatedAxis()
+
+
+
+KMCs<-JoinLayers(KMCs)
+FeaturePlot(KMCs, reduction="umap.harmony",features=c("Sox9"),label=T)
+KMCs$seurat_annotation<-NA
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("0","1","2","4","5","6","7","8","12","13","15")]<-"Cancer"
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("3","11")]<-"Myeloid"
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("16")]<-"Lymphoid"
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("17")]<-"Endocrine"
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("9")]<-"Fibroblast"
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("14")]<-"Endothelial"
+KMCs$seurat_annotation[KMCs$harmony_clusters %in% c("10")]<-"Acinar"
+DimPlot(KMCs, reduction="umap.harmony",group.by=c("seurat_annotation"),label=T)
+
+#Sup Fig 7B
+
+p<-DimPlot_scCustom(KMCs,reduction="umap.harmony",group.by = "seurat_annotation",pt.size = 0.05,label.size=2,label=T,repel=T,ggplot_default_colors = T)+coord_fixed(ratio = 0.5) +
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size =6,face="plain"),
+    strip.text = element_text(size=6,face="plain"),
+    legend.position="none"
+    
+  )
+p <- egg::set_panel_size(p, width=unit(3,"cm"), height=unit(2,"cm"))
+ggsave("Sup_Fig.7D_L.pdf", p, width = 6, height = 5, units = "cm", dpi = 300)
+
+
+KMCs$treatment<-factor(KMCs$treatment,levels=c("Ctrl_301J","MRTX_301J","MRTX_late_301J","Ctrl_303J","MRTX_303J","MRTX_late_303J"))
+KMCs$seurat_annotation<-factor(KMCs$seurat_annotation,levels=c("Acinar","Cancer","Endocrine","Endothelial","Fibroblast","Lymphoid","Myeloid"))
+
+#Sup Fig 7D
+p<-Proportion_Plot(KMCs, plot_type = "bar",split.by = "treatment",group_by_var = "seurat_annotation",x_lab_rotate=T,ggplot_default_colors=T)+
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size =6,face="plain"),
+    strip.text = element_text(size=6,face="plain"),
+    )+
+  guides(
+    fill = guide_legend(override.aes = list(size = 1),  # ← small legend points
+                        title.theme = element_text(size = 6),
+                        keywidth = 0.5,
+                        keyheight = 0.5)
+)
+p <- egg::set_panel_size(p, width=unit(3,"cm"), height=unit(2,"cm"))
+ggsave("Sup_Fig7D_R.pdf", p, width = 7, height = 5, units = "cm", dpi = 300)
+
+#BR_UP_signature
+BR_UP<-readRDS("~/Desktop/Sears_lab/Experiment/RNAseq/BR_signature/BR_UP_new.rds")
+BR_UP <- as.character(BR_UP[[1]])
+#->convert_human_gs_to_mouse.R
+convert_human_to_mouse <- function(gene_list) {
+  output = c()
+  mouse_human_genes = read.csv("https://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
+  
+  for(gene in gene_list) {
+    class_key = (mouse_human_genes %>% filter(Symbol == gene & Common.Organism.Name == "human"))[['DB.Class.Key']]
+    if( !identical(class_key, integer(0)) ) {
+      human_genes = (mouse_human_genes %>% filter(DB.Class.Key == class_key & Common.Organism.Name=="mouse, laboratory"))[,"Symbol"]
+      for(human_gene in human_genes) {
+        output = rbind(c(gene, human_gene), output)
+      }
+    }
+  }
+  return (output)
+}
+BR_UP<-convert_human_to_mouse(BR_UP)
+BR_UP<-BR_UP[,2]
+BR_UP<-list(BR_UP)
+KMCs <- AddModuleScore(object = KMCs,features = BR_UP,nbin=25,ctrl = 100,name = "BR_UP",assay = "RNA")
+
+
+
+#inferCNV
+library(infercnv)
+options(scipen = 100)
+KMCs$seurat_annotation1<-"Normal"
+KMCs$seurat_annotation1[KMCs$seurat_annotation=="Cancer"]<-"Cancer"
+Idents(KMCs)<-"seurat_annotation1"
+dataset_list <- SplitObject(KMCs, split.by = "sample")
+setwd("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV_new")
+
+for (i in names(dataset_list)) {
+  dataset <- dataset_list[[i]]
+
+Idents(dataset)<-"seurat_annotation1"
+
+gene_order_file="/Users/motoyuki/Downloads/mouse_gencode.GRCm39.vM32.basic.annotation.by_gene_name.infercnv_positions"
+infercnv_obj <- CreateInfercnvObject(
+  raw_counts_matrix = GetAssayData(dataset, layer = "counts",assay="RNA"),
+  annotations_file = as.matrix(dataset@active.ident),
+  delim = "\t",
+  gene_order_file = gene_order_file,
+  ref_group_names = c("Normal")
+)
+
+output_dir <- paste0("infercnv_output_", i)
+dir.create(output_dir)
+
+try({infercnv_obj <- infercnv::run(
+  infercnv_obj,
+  cutoff = 0.1,
+  min_cells_per_gene = 10,
+  out_dir = output_dir,
+  num_threads=4,
+  denoise = TRUE,
+  HMM = TRUE,
+  write_expr_matrix = T,
+  analysis_mode = "subclusters",
+  tumor_subcluster_partition_method='random_trees',
+  BayesMaxPNormal = 0.2,
+  plot_steps = FALSE,no_prelim_plot = TRUE, png_res = 300
+)})
+infercnv_obj <- infercnv::run(
+  infercnv_obj,
+  cutoff = 0.1,
+  min_cells_per_gene = 10,
+  out_dir = output_dir,
+  num_threads=4,
+  denoise = TRUE,
+  HMM = TRUE,
+  write_expr_matrix = T,
+  analysis_mode = "subclusters",
+  tumor_subcluster_partition_method='random_trees',
+  BayesMaxPNormal = 0.2,
+  plot_steps = FALSE,no_prelim_plot = TRUE, png_res = 300
+)
+}
+
+
+
+################tumor#########################
+KMCs_t<-subset(KMCs,subset=seurat_annotation %in% c("Cancer"))
+KMCs_t[["RNA"]]<-split(KMCs_t[["RNA"]],f=KMCs_t$sample)
+KMCs_t<-FindVariableFeatures(KMCs_t)
+KMCs_t<-ScaleData(KMCs_t)
+KMCs_t<-RunPCA(KMCs_t)
+KMCs_t<-IntegrateLayers(KMCs_t, method=HarmonyIntegration,dims=1:30, orig.reduction = "pca",new.reduction = "harmony",theta=3)
+KMCs_t<- FindNeighbors(KMCs_t, reduction = "harmony", dims = 1:30)
+KMCs_t<- FindClusters(KMCs_t, resolution = 0.8, cluster.name = "harmony_clusters",algorithm = 1)
+KMCs_t<- RunUMAP(KMCs_t, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(KMCs_t, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)+coord_fixed(ratio = 1)
+DimPlot(KMCs_t, reduction="umap.harmony",group.by=c("treatment"),label=T)+coord_fixed(ratio = 1)
+
+
+KMCs_t<-JoinLayers(KMCs_t)
+
+
+p<-DimPlot(KMCs_t, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)+coord_fixed(ratio = 1)+ 
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,angle=45,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title.y = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size = 10)
+  ) +
+  guides(
+    fill = guide_legend(override.aes = list(size = 1),
+                        title.theme = element_text(size = 6),
+                        keywidth = 0.5,
+                        keyheight = 0.5
+    ))
+p
+p<-egg::set_panel_size(p,width= unit(2.5, "cm"), height= unit(2.5, "cm"))
+ggsave("new_Fig 6H.pdf", p, width = 5, height = 5, units = "cm", dpi = 300)
+
+Idents(KMCs_t)<-"treatment"
+
+library(egg)
+library(cowplot)
+
+#Fig 6I cluster highlight
+library(egg)
+library(cowplot)
+
+clusters <- c("Ctrl_301J", "MRTX_301J", "MRTX_late_301J",
+              "Ctrl_303J", "MRTX_303J", "MRTX_late_303J")
+titles <- c("Ctrl_301J", "MRTX_301J", "MRTX_late_301J",
+            "Ctrl_303J", "MRTX_303J", "MRTX_late_303J")
+
+make_plot <- function(cluster_name, plot_title, show_x=FALSE, show_y=FALSE) {
+  p <- Cluster_Highlight_Plot(KMCs_t, cluster_name,pt.size=0.1) +
+    coord_fixed(ratio=1) +
+    ggtitle(plot_title) +
+    theme(
+      panel.grid=element_blank(),
+      axis.line=element_line(),
+      axis.ticks=element_line(),
+      axis.text.x=if(show_x) element_text(size=6, hjust=1) else element_blank(),
+      axis.text.y=if(show_y) element_text(size=6, hjust=1) else element_blank(),
+      axis.title.x=if(show_x) element_text(size=6) else element_blank(),
+      axis.title.y=if(show_y) element_text(size=6) else element_blank(),
+      legend.position="none",
+      plot.title=element_text(size=8, hjust=0.5,face="plain"),
+      plot.margin = unit(c(0,0,0,0), "cm")
+    )  # dot size
+  p <- egg::set_panel_size(p, width=unit(1.5,"cm"), height=unit(1.5,"cm"))
+  return(p)
+}
+
+plots <- list()
+for(i in 1:6){
+  show_x <- i > 3        # 下段だけ
+  show_y <- i %% 3 == 1  # 左列だけ
+  plots[[i]] <- make_plot(clusters[i], titles[i], show_x=show_x, show_y=show_y)
+}
+
+combined <- cowplot::plot_grid(plotlist=plots, ncol=3, align="hv", axis = "tblr", 
+                               rel_widths = rep(1,3),
+                               rel_heights = rep(1,2),
+                               greedy = TRUE 
+)
+ggsave("new_Fig6I.pdf", combined,width = 9,  height = 6, units = "cm",dpi = 300)
+
+
+KMCs_t <- AddModuleScore(object = KMCs_t,features = BR_UP,nbin=25,ctrl = 100,name = "BR_UP",assay = "RNA")
+
+FeaturePlot_scCustom(KMCs_t, features="BR_UP1")
+VlnPlot(KMCs_t, features="BR_UP1",group.by="treatment")
+
+#Cluster 4 and 5 are not seen in MRTX_late so compere with others (used)
+p<-FindMarkers(KMCs_t,ident.1=c("1","2","4","8","6","7"),ident.2=c("3","5"),test.use="MAST")
+EnhancedVolcano(
+  p,
+  lab = rownames(p),
+  selectLab = c("Kras","Myc"),
+  x = 'avg_log2FC',       # 平均 log2 フォールドチェンジ
+  y = 'p_val_adj',        # 調整済み p 値
+  pCutoff = 0.01,         # p値カットオフ
+  FCcutoff
+  = 1,         # log2FC カットオフ
+  title = 'Differential Expression',
+  subtitle = 'Cluster1,4 vs COther',
+  boxedLabels = TRUE,
+  colAlpha = 4/5,
+  drawConnectors = TRUE,
+  widthConnectors = 1.0,
+  xlab = 'Log2 Fold Change',
+  ylab = '-Log10 Adjusted p-value'
+)
+p$rnk<--log10(p$p_val)*p$avg_log2FC
+p$gene_name<-rownames(p)
+rnk_df <- p[, c("gene_name", "rnk")]
+rnk_df <- rnk_df[!is.na(rnk_df$gene_name) & rnk_df$gene_name != "" &!duplicated(rnk_df$gene_name),]
+max_finite_val <- max(rnk_df$rnk[is.finite(rnk_df$rnk)], na.rm = TRUE)
+min_finite_val <- min(rnk_df$rnk[is.finite(rnk_df$rnk)], na.rm = TRUE)
+replace_inf_val <- max_finite_val * 1.1 # Use a buffer
+replace_neg_inf_val <- min_finite_val * 1.1 # Use a buffer
+rnk_df$rnk[is.infinite(rnk_df$rnk) & rnk_df$rnk > 0] <- replace_inf_val
+rnk_df$rnk[is.infinite(rnk_df$rnk) & rnk_df$rnk < 0] <- replace_neg_inf_val
+rnk_df <- rnk_df[order(rnk_df$rnk, decreasing = TRUE), ]
+
+write.table(
+  rnk_df,
+  file = "~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/tumor_MAST_3_5_vs_other.rnk",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+
+
+
+#inferCNV
+hmm_results_519u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV_new/infercnv_output_519u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_522u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_522u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_542u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_542u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_550u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_550u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_552u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_552u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_641u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_641u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_640u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_640u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+hmm_results_646u<- read.delim("~/Library/CloudStorage/OneDrive-OregonHealth&ScienceUniversity/Sears Lab Member - Motoyuki Tsuda/Motoyuki Desktop/Experiment/single_cell_RNA_seq/301J/inferCNV/infercnv_output_646u/expr.infercnv.20_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.3.repr_intensities.dat",
+                              header = TRUE, 
+                              sep = "\t", 
+                              stringsAsFactors = FALSE)
+
+colnames(hmm_results_519u) <- substr(colnames(hmm_results_519u), 2, nchar(colnames(hmm_results_519u)))
+colnames(hmm_results_522u) <- substr(colnames(hmm_results_522u), 2, nchar(colnames(hmm_results_522u)))
+colnames(hmm_results_542u) <- substr(colnames(hmm_results_542u), 2, nchar(colnames(hmm_results_542u)))
+colnames(hmm_results_550u) <- substr(colnames(hmm_results_550u), 2, nchar(colnames(hmm_results_550u)))
+colnames(hmm_results_552u) <- substr(colnames(hmm_results_552u), 2, nchar(colnames(hmm_results_552u)))
+colnames(hmm_results_641u) <- substr(colnames(hmm_results_641u), 2, nchar(colnames(hmm_results_641u)))
+colnames(hmm_results_640u) <- substr(colnames(hmm_results_640u), 2, nchar(colnames(hmm_results_640u)))
+colnames(hmm_results_646u) <- substr(colnames(hmm_results_646u), 2, nchar(colnames(hmm_results_646u)))
+all_genes <- unique(unlist(list(
+  rownames(hmm_results_519u),
+  rownames(hmm_results_522u),
+  rownames(hmm_results_542u),
+  rownames(hmm_results_550u),
+  rownames(hmm_results_552u),
+  rownames(hmm_results_640u),
+  rownames(hmm_results_641u),
+  rownames(hmm_results_646u)
+)))
+
+expand_df <- function(df, genes) {
+  out <- df[genes, , drop = FALSE]
+  return(out)
+}
+
+df_list <- list(
+  hmm_results_519u,
+  hmm_results_522u,
+  hmm_results_542u,
+  hmm_results_550u,
+  hmm_results_552u,
+  hmm_results_640u,
+  hmm_results_641u,
+  hmm_results_646u
+)
+
+expanded_list <- lapply(df_list, expand_df, genes = all_genes)
+final_df <- do.call(cbind, expanded_list)
+
+KMCs[["CNV"]]<-CreateAssayObject(final_df)
+DefaultAssay(KMCs)<-"CNV"
+FeaturePlot(KMCs,reduction="umap.harmony",features="Kras")
+VlnPlot(KMCs,features="Kras")
+VlnPlot(KMCs,features="Myc")
+
+KMCs_t1<-subset(KMCs,subset=seurat_annotation=="Cancer")
+KMCs_t[["CNV"]]<-KMCs_t1[["CNV"]]
+DefaultAssay(KMCs_t)<-"CNV"
+VlnPlot(KMCs_t,features="Kras")
+VlnPlot(KMCs_t,features="Myc")
+
+kras_values <- KMCs_t@assays$CNV@data["Kras", ]
+KMCs_t@meta.data$Kras_CNV <- case_when(
+  kras_values == 1 ~ "2",
+  kras_values == 1.5 ~ "3",
+  kras_values == 2 ~ "4",
+  kras_values == 3 ~ ">4",
+)
+KMCs_t@meta.data$Kras_CNV<-factor(KMCs_t@meta.data$Kras_CNV, level=c(">4","4","3","2")) 
+#Fig 6L
+p<-DimPlot(KMCs_t,reduction="umap.harmony",group.by = "Kras_CNV",pt.size = 0.05,split.by="treatment")+coord_fixed(ratio = 1) +scale_color_manual(values = c("2" = "lightgray", "3" = "blue", "4" = "orange", ">4" = "red"))+
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size =10,face="plain"),
+    strip.text = element_text(size=8,face="plain")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 1),  
+                         title.theme = element_text(size = 6),
+                         keywidth = 0.3,
+                         keyheight = 0.3)
+  )
+p <- egg::set_panel_size(p, width=unit(2,"cm"), height=unit(2,"cm"))
+ggsave("new_Fig 6K.pdf", p, width = 16, height = 5, units = "cm", dpi = 300)
+
+table(KMCs_t$Kras_CNV,KMCs_t$Myc_CNV)
+
+
+
+Ctrl301J<-subset(KMCs_t,subset=treatment=="Ctrl_301J")
+table(Ctrl301J$Kras_CNV,Ctrl301J$Myc_CNV)
+
+MRTX301J<-subset(KMCs_t,subset=treatment=="MRTX_301J")
+table(MRTX301J$Kras_CNV,MRTX301J$Myc_CNV)
+
+MRTX301J_late<-subset(KMCs_t,subset=treatment=="MRTX_late_301J")
+table(MRTX301J_late$Kras_CNV,MRTX301J_late$Myc_CNV)
+
+
+Ctrl303J<-subset(KMCs_t,subset=treatment=="Ctrl_303J")
+table(Ctrl303J$Kras_CNV,Ctrl303J$Myc_CNV)
+
+MRTX303J<-subset(KMCs_t,subset=treatment=="MRTX_303J")
+table(MRTX303J$Kras_CNV,MRTX303J$Myc_CNV)
+
+MRTX303J_late<-subset(KMCs_t,subset=treatment=="MRTX_late_303J")
+table(MRTX303J_late$Kras_CNV,MRTX303J_late$Myc_CNV)
+
+
+
+
+
+
+#Supple Fig7E
+DefaultAssay(KMCs_t)<-"RNA"
+p<-VlnPlot(KMCs_t,features="H2-K1",group.by="treatment", pt.size=0)+
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size =6,face="plain"),
+    strip.text = element_text(size=6,face="plain"),
+    legend.position = "none"
+  )
+p <- egg::set_panel_size(p, width=unit(3,"cm"), height=unit(2,"cm"))
+ggsave("new_Sup_Fig.7E.pdf", p, width = 7, height = 5, units = "cm", dpi = 300)
+
+
+#Myeloid
+KMCs_m<-subset(KMCs,subset=seurat_annotation %in% c("Myeloid"))
+KMCs_m[["RNA"]]<-split(KMCs_m[["RNA"]],f=KMCs_m$sample)
+KMCs_m<-FindVariableFeatures(KMCs_m)
+KMCs_m<-ScaleData(KMCs_m)
+KMCs_m<-RunPCA(KMCs_m)
+KMCs_m<-IntegrateLayers(KMCs_m, method=HarmonyIntegration,dims=1:30, orig.reduction = "pca",new.reduction = "harmony")
+KMCs_m<- FindNeighbors(KMCs_m, reduction = "harmony", dims = 1:30)
+KMCs_m<- FindClusters(KMCs_m, resolution = 0.2, cluster.name = "harmony_clusters")
+KMCs_m<- RunUMAP(KMCs_m, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(KMCs_m, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+KMCs_m<-JoinLayers(KMCs_m)
+Idents(KMCs_m)<-"harmony_clusters"
+cancer.markers <- FindAllMarkers(KMCs_m, only.pos = TRUE)
+cancer.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 0.1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(KMCs_m, features = top10$gene) + NoLegend()+ theme(text = element_text(size = 7))
+
+DotPlot(KMCs_m,features=c("Krt19","Epcam","Sox9","Cpa1","Vim","Col1a1","Dcn","Acta2","Rgs5","Pecam1","Cd34","Cd3e","Cd4","Cd8a","Il7r","Klrd1","Cd79a","Ms4a1","Igha1","Fcer1g","Cd68","H2-Aa","Cd74","Itgax","Clu","Ms4a2","S100a8","Gzmb","Mki67","Top2a","Hbb"),group.by="harmony_clusters")+RotatedAxis()
+DotPlot(KMCs_m,features=c("Cd3d","Cd3g","Cd3e","Il7r","Cd4","Cd8a","Cd8b","Slc4a10","Ncam1","Klrf1","Ms4a1","Ms4a2","Cd79a","Ighm","Ighg1","Lyz","Cd14","Fcgr3a","Ms4a7","Clec4c","Lilra4","Fcer1a","Cd34","Spink2","Cel","Krt19","Clu","Sox9","Lox","Esam","Pdgfra","Pdgfrb","Pecam1","Mki67","S100a9","Naaa","Cd209a","Ccl22","Ccl5"),group.by="harmony_clusters")+RotatedAxis()
+
+Macro<-c("APOE","APOC1","C1QB","C1QC","RNASE1","ACP5","GPNMB","PLD3","CTSB","PLTP","CD9","PRDX1","CTSZ","DAB2","CD63","CD81","LIPA","GLUL","SLCO2B1","CREG1","LGALS3","LAMP1")
+cMo<-c("S100A8","S100A9","S100A12","VCAN","CSF3R")
+CD16Mo<-c("CDKN1C","LRRC25","TCF7L2","LYN","PILRA")
+cDC1<-c("CPNE3","WDFY4","CADM1","CDK2AP2","SNX3")
+DC2_3<-c("FCER1A","CD1C","CLEC10A")
+mregDC<-c("CCR7","CCL22","LAMP3","EBI3","RAB8B","CERS6")
+Macro<-convert_human_to_mouse(Macro)
+Macro<-Macro[,2]
+Macro<-list(Macro)
+cMo<-convert_human_to_mouse(cMo)
+cMo<-cMo[,2]
+cMo<-list(cMo)
+CD16Mo<-convert_human_to_mouse(CD16Mo)
+CD16Mo<-CD16Mo[,2]
+CD16Mo<-list(CD16Mo)
+cDC1<-convert_human_to_mouse(cDC1)
+cDC1<-cDC1[,2]
+cDC1<-list(cDC1)
+DC2_3<-convert_human_to_mouse(DC2_3)
+DC2_3<-DC2_3[,2]
+DC2_3<-list(DC2_3)
+mregDC<-convert_human_to_mouse(mregDC)
+mregDC<-mregDC[,2]
+mregDC<-list(mregDC)
+KMCs_m <- AddModuleScore(object = KMCs_m,features = Macro,nbin=25,ctrl = 100,name = "Macro",assay = "RNA")
+KMCs_m <- AddModuleScore(object = KMCs_m,features = cMo,nbin=25,ctrl = 100,name = "cMo",assay = "RNA")
+KMCs_m <- AddModuleScore(object = KMCs_m,features = CD16Mo,nbin=25,ctrl = 100,name = "CD16Mo",assay = "RNA")
+KMCs_m <- AddModuleScore(object = KMCs_m,features = cDC1,nbin=25,ctrl = 100,name = "cDC1",assay = "RNA")
+KMCs_m <- AddModuleScore(object = KMCs_m,features = DC2_3,nbin=25,ctrl = 100,name = "DC2_3",assay = "RNA")
+KMCs_m <- AddModuleScore(object = KMCs_m,features = mregDC,nbin=25,ctrl = 100,name = "mregDC",assay = "RNA")
+
+FeaturePlot(KMCs_m, features="Macro1")
+FeaturePlot(KMCs_m, features="cMo1")
+FeaturePlot(KMCs_m, features="CD16Mo1")
+FeaturePlot(KMCs_m, features="cDC11")
+FeaturePlot(KMCs_m, features="DC2_31")
+FeaturePlot(KMCs_m, features="mregDC1")
+FeaturePlot(KMCs_m, features="H2-Ab1")
+KMCs_m$seurat_annotation<-NA
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("0")]<-"Apoe+ Macro"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("2")]<-"Doublet"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("3")]<-"Mono"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("1")]<-"Acp5+ Macro"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("4")]<-"cDC"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("5")]<-"stromal"
+DimPlot(KMCs_m, reduction="umap.harmony",group.by=c("seurat_annotation"),label=T,repel=T)
+Idents(KMCs_m)<-"seurat_annotation"
+
+KMCs_m<-subset(KMCs_m,subset=seurat_annotation %in% c("Doublet","stromal"),invert=T)
+KMCs_m[["RNA"]]<-split(KMCs_m[["RNA"]],f=KMCs_m$sample)
+KMCs_m<-FindVariableFeatures(KMCs_m)
+KMCs_m<-ScaleData(KMCs_m)
+KMCs_m<-RunPCA(KMCs_m)
+KMCs_m<-IntegrateLayers(KMCs_m, method=HarmonyIntegration,dims=1:30, orig.reduction = "pca",new.reduction = "harmony")
+KMCs_m<- FindNeighbors(KMCs_m, reduction = "harmony", dims = 1:30)
+KMCs_m<- FindClusters(KMCs_m, resolution = 0.3, cluster.name = "harmony_clusters")
+KMCs_m<- RunUMAP(KMCs_m, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(KMCs_m, reduction="umap.harmony",group.by=c("harmony_clusters"),label=T)
+KMCs_m<-JoinLayers(KMCs_m)
+Idents(KMCs_m)<-"harmony_clusters"
+cancer.markers <- FindAllMarkers(KMCs_m, only.pos = TRUE)
+cancer.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 0.1) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(KMCs_m, features = top10$gene) + NoLegend()+ theme(text = element_text(size = 7))
+
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("0","1")]<-"Apoe+ Macro"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("2")]<-"Acp5+ Macro"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("3")]<-"Mono"
+KMCs_m$seurat_annotation[KMCs_m$harmony_clusters %in% c("4")]<-"DC"
+
+p<-DimPlot_scCustom(KMCs_m, reduction="umap.harmony",group.by=c("seurat_annotation"),pt.size = 0.05,label.size=2,label=T,repel=T,ggplot_default_colors = T)+coord_fixed() +
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size =6,face="plain"),
+    strip.text = element_text(size=6,face="plain"),
+    legend.position="none"
+  )
+p <- egg::set_panel_size(p, width=unit(3,"cm"), height=unit(2,"cm"))
+ggsave("new_Sup_Fig.7F L.pdf", p, width = 6, height = 5, units = "cm", dpi = 300)
+
+
+KMCs_m$seurat_annotation<-factor(KMCs_m$seurat_annotation,levels=c("Acp5+ Macro","Apoe+ Macro","DC","Mono"))
+p<-Proportion_Plot(KMCs_m, plot_type = "bar",split.by = "treatment",group_by_var = "seurat_annotation",x_lab_rotate=T,ggplot_default_colors=T)+
+  theme(
+    panel.grid = element_blank(),        # remove background grid lines
+    axis.line = element_line(),          # add axis lines
+    axis.ticks = element_line(),
+    axis.text.x = element_text(size = 6,hjust=1),
+    axis.text.y = element_text(size = 6,hjust=1),
+    axis.title = element_text(size = 6),
+    legend.text = element_text(size = 6),     
+    plot.title = element_text(hjust = 0.5, size =6,face="plain"),
+    strip.text = element_text(size=6,face="plain"),
+  )+
+  guides(
+    fill = guide_legend(override.aes = list(size = 1),  # ← small legend points
+                        title.theme = element_text(size = 6),
+                        keywidth = 0.5,
+                        keyheight = 0.5)
+  )
+p <- egg::set_panel_size(p, width=unit(3,"cm"), height=unit(2,"cm"))
+ggsave("new_Sup_Fig.7F R.pdf", p, width = 7, height = 5, units = "cm", dpi = 300)
+
+
+
+
+#Lymphoid
+KMCs_l<-subset(KMCs,subset=seurat_annotation %in% c("Lymphoid"))
+KMCs_l[["RNA"]]<-split(KMCs_l[["RNA"]],f=KMCs_l$sample)
+table(KMCs_l$sample)
+KMCs_l<-FindVariableFeatures(KMCs_l)
+KMCs_l<-ScaleData(KMCs_l)
+KMCs_l<-RunPCA(KMCs_l)
+KMCs_l<-IntegrateLayers(KMCs_l, method=HarmonyIntegration,dims=1:30, orig.reduction = "pca",new.reduction = "harmony")
+KMCs_l<- FindNeighbors(KMCs_l, reduction = "harmony",dims = 1:30)
+KMCs_l<- FindClusters(KMCs_l, resolution = 0.8, cluster.name = "harmony_clusters")
+KMCs_l<- RunUMAP(KMCs_l, dims = 1:30, reduction = "harmony",reduction.name = "umap.harmony")
+DimPlot(KMCs_l, reduction = "umap.harmony",label=T)
+
+FeaturePlot(KMCs_l, features= "Cd8a",label=T)
+
+KMCs_l<-JoinLayers(KMCs_l)
+Idents(KMCs_l)<-"harmony_clusters"
+cancer.markers <- FindAllMarkers(KMCs_l, only.pos = TRUE)
+cancer.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 0.25) %>%
+  slice_head(n = 10) %>%
+  ungroup() -> top10
+DoHeatmap(KMCs_l, features = top10$gene) + NoLegend()+ theme(text = element_text(size = 7))
+
+Idents(KMCs)<-"seurat_annotation"
+prop.table(table(Idents(KMCs),KMCs$treatment),margin=2)
+
+KMCs$seurat_annotation1<-KMCs$seurat_annotation
+KMCs$seurat_annotation1<-KMCs_m$seurat_annotation
+
+
+  
+  #Ctrl_301J_vs_Ctrl_303J comparison
+  KMCs_t_Ctrl<-subset(KMCs_t,subset=treatment%in% c("Ctrl_301J","Ctrl_303J"))
+  DefaultAssay(KMCs_t_Ctrl)<-"RNA"
+  KMCs_t_Ctrl<-JoinLayers(KMCs_t_Ctrl)
+  KMCs_t_Ctrl <- AddModuleScore(object = KMCs_t_Ctrl,features = BR_UP,nbin=25,ctrl = 100,name = "BR_UP",assay = "RNA")
+ 
+ p<- VlnPlot_scCustom(KMCs_t_Ctrl,features="BR_UP1",group.by="treatment",plot_median = T,pt.size=0)+
+    labs( x=NULL,y = "Addmodule score",title="BR Score")+
+   ggpubr::stat_compare_means(comparisons = list(c("Ctrl_301J","Ctrl_303J")), label = "p.format",method="t.test",size=2) +
+    coord_cartesian(ylim = c(NA, max(KMCs_t_Ctrl$BR_UP1) * 1.4)) + 
+    theme(
+      panel.grid = element_blank(),        # remove background grid lines
+      axis.line = element_line(),          # add axis lines
+      axis.ticks = element_line(),
+      axis.text.x = element_text(size = 6,angle=45,hjust=1),
+      axis.text.y = element_text(size = 6,hjust=1),
+      axis.title.y = element_text(size = 6),
+      legend.text = element_text(size = 6),     
+      plot.title = element_text(hjust = 0.5, size = 10)
+    ) +
+    guides(
+      fill = guide_legend(override.aes = list(size = 1),
+        title.theme = element_text(size = 6),
+        keywidth = 0.5,
+        keyheight = 0.5
+      ))
+ 
+  p<-egg::set_panel_size(p,width= unit(1.5, "cm"), height= unit(2.2, "cm"))
+  ggsave("new_Fig 6D.pdf", p, width = 5, height = 5, units = "cm", dpi = 300)
+  
